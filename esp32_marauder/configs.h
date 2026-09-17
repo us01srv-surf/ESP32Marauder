@@ -462,7 +462,6 @@
     #define USE_SD
     #define HAS_PSRAM
     #define HAS_DIRECT_UPLOAD
-    #define HAS_NIMBLE_2
   #endif
 
   #ifdef ESP32_LDDB
