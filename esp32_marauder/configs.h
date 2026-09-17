@@ -2589,6 +2589,10 @@
       #define SD_CS 10
     #endif
 
+    #ifdef MARAUDER_S3_N16R8
+      #define SD_CS 10
+    #endif
+
     #ifdef ESP32_LDDB
       #define SD_CS 4
     #endif
