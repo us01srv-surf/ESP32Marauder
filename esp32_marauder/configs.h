@@ -458,7 +458,6 @@
 
   #ifdef MARAUDER_S3_N16R8
     #define HAS_BT
-    #define HAS_GPS
     #define HAS_SD
     #define USE_SD
     #define HAS_PSRAM
