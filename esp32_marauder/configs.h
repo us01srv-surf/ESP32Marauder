@@ -37,6 +37,7 @@
   //#define MARAUDER_T_DONGLE_C5
   //#define MARAUDER_CARDPUTER
   //#define MARAUDER_CARDPUTER_ADV
+  //#define MARAUDER_S3_N16R8
   //#define MARAUDER_V8
   //#define MARAUDER_PANCAKE
   //#define MARAUDER_MINI_V3
@@ -453,6 +454,16 @@
     //#define HAS_PSRAM
     //#define HAS_TEMP_SENSOR
     #define HAS_DIRECT_UPLOAD
+  #endif
+
+  #ifdef MARAUDER_S3_N16R8
+    #define HAS_BT
+    #define HAS_GPS
+    #define HAS_SD
+    #define USE_SD
+    #define HAS_PSRAM
+    #define HAS_DIRECT_UPLOAD
+    #define HAS_NIMBLE_2
   #endif
 
   #ifdef ESP32_LDDB
