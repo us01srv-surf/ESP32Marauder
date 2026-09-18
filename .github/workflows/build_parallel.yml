@@ -307,7 +307,7 @@ jobs:
             # Fall back to just the app binary
             cp "$APP_BIN" "$BUILD_DIR/esp32_marauder_merged.bin"
           else
-            # Extract flash size from FQBN (e.g. FlashSize=16M → 16MB)
+            # Extract flash size from FQBN (e.g. FlashSize=16M -> 16MB)
             FQBN="${{ matrix.board.fbqn }}"
             FLASH_SIZE_MB=$(echo "$FQBN" | grep -oP 'FlashSize=\K[0-9]+M' | head -1)
             if [ -z "$FLASH_SIZE_MB" ]; then
@@ -315,35 +315,39 @@ jobs:
             else
               FLASH_SIZE="${FLASH_SIZE_MB}B"
             fi
-            
-            # Set flash mode based on chip type
+
+            # Determine chip type from FQBN
             if [[ "$FQBN" == *"esp32s3"* ]]; then
+              CHIP="esp32s3"
               FLASH_MODE="dio"
               FLASH_FREQ="80m"
             elif [[ "$FQBN" == *"esp32s2"* ]]; then
+              CHIP="esp32s2"
               FLASH_MODE="dout"
               FLASH_FREQ="80m"
             else
+              CHIP="esp32"
               FLASH_MODE="dio"
               FLASH_FREQ="80m"
             fi
-            
+
             echo "Creating merged binary with:"
+            echo "  Chip: $CHIP"
             echo "  Bootloader: $BOOTLOADER (at 0x0)"
             echo "  Partitions: $PARTITIONS (at 0x8000)"
             echo "  App: $APP_BIN (at 0x10000)"
             echo "  Flash: $FLASH_MODE, $FLASH_FREQ, $FLASH_SIZE"
-            
+
             # Create merged binary
-            esptool.py merge_bin \
-              --flash_mode "$FLASH_MODE" \
-              --flash_size "$FLASH_SIZE" \
-              --flash_freq "$FLASH_FREQ" \
+            esptool.py --chip "$CHIP" merge-bin \
+              --flash-mode "$FLASH_MODE" \
+              --flash-size "$FLASH_SIZE" \
+              --flash-freq "$FLASH_FREQ" \
               -o "$BUILD_DIR/esp32_marauder_merged.bin" \
               0x0 "$BOOTLOADER" \
               0x8000 "$PARTITIONS" \
               0x10000 "$APP_BIN"
-            
+
             echo "Merged binary created successfully"
             ls -lh "$BUILD_DIR/esp32_marauder_merged.bin"
           fi
