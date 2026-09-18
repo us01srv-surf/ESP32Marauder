@@ -271,13 +271,90 @@ jobs:
       #  run: |
       #    mv ./esp32_marauder/build/esp32.esp32.${{ matrix.board.build_dir }}/esp32_marauder.ino.bin ./esp32_marauder/build/esp32.esp32.${{ matrix.board.build_dir }}/esp32_marauder.${{ matrix.board.file_name }}.bin
       
+      - name: Create Merged Binary for ${{ matrix.board.name }}
+        run: |
+          BUILD_DIR=./esp32_marauder/build/esp32.esp32.${{ matrix.board.build_dir }}
+          
+          # List build directory contents for debugging
+          echo "=== Build directory contents ==="
+          ls -la "$BUILD_DIR/"
+          
+          # Find bootloader file
+          BOOTLOADER=""
+          for f in "$BUILD_DIR"/bootloader.bin "$BUILD_DIR"/*bootloader*.bin; do
+            if [ -f "$f" ]; then
+              BOOTLOADER="$f"
+              echo "Found bootloader: $BOOTLOADER"
+              break
+            fi
+          done
+          
+          # Find partition table file
+          PARTITIONS=""
+          for f in "$BUILD_DIR"/partition*.bin "$BUILD_DIR"/partitions*.bin "$BUILD_DIR"/*partition*.bin; do
+            if [ -f "$f" ]; then
+              PARTITIONS="$f"
+              echo "Found partitions: $PARTITIONS"
+              break
+            fi
+          done
+          
+          APP_BIN="$BUILD_DIR/esp32_marauder.ino.bin"
+          
+          if [ -z "$BOOTLOADER" ] || [ -z "$PARTITIONS" ]; then
+            echo "WARNING: Could not find bootloader or partition table"
+            echo "Attempting to use esptool merge_bin with available files"
+            # Fall back to just the app binary
+            cp "$APP_BIN" "$BUILD_DIR/esp32_marauder_merged.bin"
+          else
+            # Extract flash size from FQBN (e.g. FlashSize=16M → 16MB)
+            FQBN="${{ matrix.board.fbqn }}"
+            FLASH_SIZE_MB=$(echo "$FQBN" | grep -oP 'FlashSize=\K[0-9]+M' | head -1)
+            if [ -z "$FLASH_SIZE_MB" ]; then
+              FLASH_SIZE="4MB"
+            else
+              FLASH_SIZE="${FLASH_SIZE_MB}B"
+            fi
+            
+            # Set flash mode based on chip type
+            if [[ "$FQBN" == *"esp32s3"* ]]; then
+              FLASH_MODE="dio"
+              FLASH_FREQ="80m"
+            elif [[ "$FQBN" == *"esp32s2"* ]]; then
+              FLASH_MODE="dout"
+              FLASH_FREQ="80m"
+            else
+              FLASH_MODE="dio"
+              FLASH_FREQ="80m"
+            fi
+            
+            echo "Creating merged binary with:"
+            echo "  Bootloader: $BOOTLOADER (at 0x0)"
+            echo "  Partitions: $PARTITIONS (at 0x8000)"
+            echo "  App: $APP_BIN (at 0x10000)"
+            echo "  Flash: $FLASH_MODE, $FLASH_FREQ, $FLASH_SIZE"
+            
+            # Create merged binary
+            esptool.py merge_bin \
+              --flash_mode "$FLASH_MODE" \
+              --flash_size "$FLASH_SIZE" \
+              --flash_freq "$FLASH_FREQ" \
+              -o "$BUILD_DIR/esp32_marauder_merged.bin" \
+              0x0 "$BOOTLOADER" \
+              0x8000 "$PARTITIONS" \
+              0x10000 "$APP_BIN"
+            
+            echo "Merged binary created successfully"
+            ls -lh "$BUILD_DIR/esp32_marauder_merged.bin"
+          fi
+          
       - name: Rename and Upload ${{ matrix.board.name }} Artifact
         run: |
           VERSION=$(grep '#define MARAUDER_VERSION' ./esp32_marauder/configs.h | sed -E 's/.*"v([^"]+)"/v\1/' | tr '.' '_')
           DATE=$(date +%Y%m%d)
 
           BUILD_DIR=./esp32_marauder/build/esp32.esp32.${{ matrix.board.build_dir }}
-          INPUT_BIN=$BUILD_DIR/esp32_marauder.ino.bin
+          INPUT_BIN=$BUILD_DIR/esp32_marauder_merged.bin
           OUTPUT_BIN=esp32_marauder_${VERSION}_${DATE}_${{ matrix.board.file_name }}.bin
           VERSION_DOT=${VERSION_DOT}
 
