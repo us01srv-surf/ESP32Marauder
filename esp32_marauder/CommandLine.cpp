@@ -752,6 +752,37 @@ void CommandLine::runCommand(String input) {
   else if (cmd_args.get(0) == REBOOT_CMD)
     ESP.restart();
 
+  //// Web control server (:8080) — dispatched UNCONDITIONALLY, before the
+  //// scanning() guard below. `webui stop`/`start`/`status` must stay reachable
+  //// while a scan or recon is running (stopping the service to reclaim memory
+  //// is most useful mid-scan), so this mirrors how stopscan/recon live in the
+  //// always-on chain above instead of the guarded WiFi/scan chain.
+  if (cmd_args.get(0) == WEBUI_CMD) {
+    int ap_sw = this->argSearch(&cmd_args, "-ap");
+    int sta_sw = this->argSearch(&cmd_args, "-sta");
+
+    String webui_command = cmd_args.size() > 1 ? cmd_args.get(1) : "";
+    uint8_t webui_mode = WEBUI_MODE_AP;
+    if (ap_sw != -1)
+      webui_mode = WEBUI_MODE_AP;
+    else if (sta_sw != -1)
+      webui_mode = WEBUI_MODE_STA;
+
+    if (webui_command == "start") {
+      webui_obj.start(webui_mode);
+    }
+    else if (webui_command == "stop") {
+      webui_obj.stop();
+    }
+    else if (webui_command == "status") {
+      webui_obj.status();
+    }
+    else {
+      Serial.println(HELP_WEBUI_CMD);
+    }
+    return;
+  }
+
   //// WiFi/Bluetooth Scan/Attack commands
   if (!wifi_scan_obj.scanning()) {
     // Dump pcap/log to serial too, valid for all scan/attack commands
@@ -978,31 +1009,8 @@ void CommandLine::runCommand(String input) {
         }
       }
     }
-    // Web control server (serves :8080; the Evil Portal keeps :80)
-    else if (cmd_args.get(0) == WEBUI_CMD) {
-      int ap_sw = this->argSearch(&cmd_args, "-ap");
-      int sta_sw = this->argSearch(&cmd_args, "-sta");
-
-      String webui_command = cmd_args.size() > 1 ? cmd_args.get(1) : "";
-      uint8_t webui_mode = WEBUI_MODE_AP;
-      if (ap_sw != -1)
-        webui_mode = WEBUI_MODE_AP;
-      else if (sta_sw != -1)
-        webui_mode = WEBUI_MODE_STA;
-
-      if (webui_command == "start") {
-        webui_obj.start(webui_mode);
-      }
-      else if (webui_command == "stop") {
-        webui_obj.stop();
-      }
-      else if (webui_command == "status") {
-        webui_obj.status();
-      }
-      else {
-        Serial.println(HELP_WEBUI_CMD);
-      }
-    }
+    // Web control server dispatch moved ABOVE the scanning() guard (see
+    // WEBUI_CMD) so `webui stop` works while a scan/recon is running.
     else if (cmd_args.get(0) == SCAN_ALL_CMD) {
       Serial.print(F("Scanning for APs and Stations. Stop with "));
       Serial.println(STOPSCAN_CMD);
