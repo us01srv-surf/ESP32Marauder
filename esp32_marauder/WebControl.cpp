@@ -439,7 +439,7 @@ void WebControl::handleScan(AsyncWebServerRequest* request) {
   if (shedRequest(request, "scan"))
     return;
 
-  AsyncWebParameter* mode_param = request->getParam("mode");
+  const AsyncWebParameter* mode_param = request->getParam("mode");
   if (mode_param == nullptr) {
     sendError(request, "scan", "BAD_PARAM", 400);
     return;
@@ -475,7 +475,7 @@ void WebControl::handleRecon(AsyncWebServerRequest* request) {
   if (shedRequest(request, "recon"))
     return;
 
-  AsyncWebParameter* mode_param = request->getParam("mode");
+  const AsyncWebParameter* mode_param = request->getParam("mode");
   if (mode_param == nullptr) {
     sendError(request, "recon", "BAD_PARAM", 400);
     return;
@@ -527,7 +527,7 @@ void WebControl::handleCli(AsyncWebServerRequest* request) {
   if (shedRequest(request, "cli"))
     return;
 
-  AsyncWebParameter* cmd_param = request->getParam("cmd");
+  const AsyncWebParameter* cmd_param = request->getParam("cmd");
   if (cmd_param == nullptr) {
     sendError(request, "cli", "BAD_PARAM", 400);
     return;
