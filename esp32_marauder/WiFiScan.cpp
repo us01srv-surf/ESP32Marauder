@@ -2603,6 +2603,63 @@ bool WiFiScan::scanning() {
     return true;
 }
 
+// Status LED mode for a given scan/attack. Kept central so StartScan() picks
+// the indicator without needing a per-Run* edit. Existing setLEDMode() calls
+// inside Run* still run first; this normalizes the final state per category.
+static int ledModeForScan(uint8_t scan_mode) {
+  switch (scan_mode) {
+    case WIFI_SCAN_OFF:
+      return MODE_OFF;
+    // BLE scans get their own indicator color
+    case BT_SCAN_ALL:
+    case BT_SCAN_SKIMMERS:
+    case BT_SCAN_WAR_DRIVE:
+    case BT_SCAN_WAR_DRIVE_CONT:
+    case BT_SCAN_AIRTAG:
+    case BT_SCAN_FLIPPER:
+    case BT_SCAN_ANALYZER:
+    case BT_SCAN_AIRTAG_MON:
+    case BT_SCAN_FLOCK:
+    case BT_SCAN_SIMPLE:
+    case BT_SCAN_SIMPLE_TWO:
+    case BT_SCAN_FLOCK_WARDRIVE:
+    case BT_SCAN_RAYBAN:
+    case BT_SCAN_FOX_HUNT:
+      return MODE_BLE;
+    // WiFi and BT attacks blink red
+    case WIFI_ATTACK_BEACON_SPAM:
+    case WIFI_ATTACK_RICK_ROLL:
+    case WIFI_ATTACK_BEACON_LIST:
+    case WIFI_ATTACK_AUTH:
+    case WIFI_ATTACK_MIMIC:
+    case WIFI_ATTACK_DEAUTH:
+    case WIFI_ATTACK_AP_SPAM:
+    case WIFI_ATTACK_DEAUTH_MANUAL:
+    case WIFI_ATTACK_DEAUTH_TARGETED:
+    case WIFI_ATTACK_BAD_MSG:
+    case WIFI_ATTACK_BAD_MSG_TARGETED:
+    case WIFI_ATTACK_SLEEP:
+    case WIFI_ATTACK_SLEEP_TARGETED:
+    case WIFI_ATTACK_SAE_COMMIT:
+    case WIFI_ATTACK_CSA:
+    case WIFI_ATTACK_QUIET:
+    case WIFI_ATTACK_FUNNY_BEACON:
+    case BT_ATTACK_SOUR_APPLE:
+    case BT_ATTACK_SWIFTPAIR_SPAM:
+    case BT_ATTACK_SPAM_ALL:
+    case BT_ATTACK_SAMSUNG_SPAM:
+    case BT_ATTACK_GOOGLE_SPAM:
+    case BT_ATTACK_FLIPPER_SPAM:
+    case BT_ATTACK_APPLE_JUICE:
+    case BT_ATTACK_FINDMY_LIVE:
+    case BT_SPOOF_AIRTAG:
+      return MODE_ATTACK;
+    // WiFi scans, recon, GPS, port scans, etc.
+    default:
+      return MODE_SNIFF;
+  }
+}
+
 // Function to prepare to run a specific scan
 void WiFiScan::StartScan(uint8_t scan_mode, uint16_t color) {  
   this->initWiFi(scan_mode);
@@ -2786,6 +2843,10 @@ void WiFiScan::StartScan(uint8_t scan_mode, uint16_t color) {
     #endif
   }
 
+  // Give every scan/attack the right status LED after the Run* dispatch so
+  // each Run* does not need its own edit and stale modes are cleared.
+  this->setLEDMode(ledModeForScan(scan_mode));
+
   this->currentScanMode = scan_mode;
 }
 
@@ -2819,6 +2880,18 @@ void WiFiScan::setLEDMode(int mode) {
       stickc_led.offLED();
     #elif defined(HAS_NEOPIXEL_LED) || defined(HAS_T_DONGLE_LED)
       led_obj.setMode(MODE_OFF);
+    #endif
+  } else if (mode == MODE_BLE) {
+    // BLE scans: boards with their own LED backends fall back to the sniff
+    // look; NeoPixel boards get the dedicated MODE_BLE color.
+    #ifdef HAS_FLIPPER_LED
+      flipper_led.sniffLED();
+    #elif defined(XIAO_ESP32_S3)
+      xiao_led.sniffLED();
+    #elif defined(MARAUDER_M5STICKC)
+      stickc_led.sniffLED();
+    #elif defined(HAS_NEOPIXEL_LED) || defined(HAS_T_DONGLE_LED)
+      led_obj.setMode(MODE_BLE);
     #endif
   }
 }
@@ -3152,6 +3225,10 @@ void WiFiScan::StopScan(uint8_t scan_mode) {
   #ifdef HAS_GPS
     gps_obj.disable_queue();
   #endif
+
+  // Scan is torn down; make sure the status LED goes dark even if the
+  // WiFi/BT shutdown paths above never ran for this mode.
+  this->setLEDMode(MODE_OFF);
 }
 
 void WiFiScan::getMAC(bool get_sta, uint8_t* mac) {

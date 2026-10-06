@@ -185,6 +185,8 @@ void ReconMission::stop() {
   buffer_obj.setDirectory(NULL);
   running = false;
   suppress_scan_ui = false;
+  // Recon finished/stopped: dark out the status LED.
+  wifi_scan_obj.setLEDMode(MODE_OFF);
 }
 
 void ReconMission::writeRelationship(const uint8_t station[6],

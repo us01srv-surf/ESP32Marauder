@@ -55,10 +55,13 @@ void LedInterface::main(uint32_t currentTime) {
     this->rainbow();
   }
   else if (mode_to_render == MODE_ATTACK) {
-    this->attackLed();
+    this->attackLed(currentTime);
   }
   else if (mode_to_render == MODE_SNIFF) {
-    this->sniffLed();
+    this->sniffLed(currentTime);
+  }
+  else if (mode_to_render == MODE_BLE) {
+    this->bleLed();
   }
   else if (mode_to_render == MODE_CUSTOM) {
     return;
@@ -108,12 +111,38 @@ void LedInterface::writeApa102Color(uint8_t red, uint8_t green, uint8_t blue) {
 }
 #endif
 
-void LedInterface::sniffLed() {
-  this->setColor(0, 0, 255);
+// Blue "sniffing" indicator: soft breathing pulse driven by millis() deltas
+// so the animation stays non-blocking inside main().
+void LedInterface::sniffLed(uint32_t currentTime) {
+  if (currentTime - this->last_anim_ms >= 20) {
+    this->last_anim_ms = currentTime;
+    this->pulse_level += 12 * this->pulse_dir;
+    if (this->pulse_level >= 255) {
+      this->pulse_level = 255;
+      this->pulse_dir = -1;
+    }
+    else if (this->pulse_level <= 30) {
+      this->pulse_level = 30;
+      this->pulse_dir = 1;
+    }
+  }
+  this->setColor(0, 0, (uint8_t)this->pulse_level);
 }
 
-void LedInterface::attackLed() {
-  this->setColor(255, 0, 0);
+// Red attack indicator: aggressive blink toggled on millis() deltas
+// (250 ms on / 250 ms off), no delay() anywhere in the path.
+void LedInterface::attackLed(uint32_t currentTime) {
+  if (currentTime - this->last_anim_ms >= 250) {
+    this->last_anim_ms = currentTime;
+    this->blink_on = !this->blink_on;
+  }
+  this->setColor(this->blink_on ? 255 : 0, 0, 0);
+}
+
+// Steady green marker for BLE scans so they read distinctly from the
+// pulsing blue WiFi sniff indicator and the blinking red attack indicator.
+void LedInterface::bleLed() {
+  this->setColor(0, 255, 0);
 }
 
 void LedInterface::ledOff() {

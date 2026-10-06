@@ -64,6 +64,7 @@
   #define MODE_ATTACK 2
   #define MODE_SNIFF 3
   #define MODE_CUSTOM 4
+  #define MODE_BLE 5
 
   //// HARDWARE NAMES
   #ifdef MARAUDER_M5STICKC
@@ -461,6 +462,7 @@
     #define HAS_SD
     #define USE_SD
     #define HAS_PSRAM
+    #define HAS_NEOPIXEL_LED
     #define HAS_DIRECT_UPLOAD
   #endif
 
@@ -2762,6 +2764,8 @@
       #define PIN 21
     #elif defined(MARAUDER_M5_NANO_C6)
       #define PIN 20
+    #elif defined(MARAUDER_S3_N16R8)
+      #define PIN 48
     #else
       #define PIN 25
     #endif

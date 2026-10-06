@@ -742,7 +742,6 @@ class WiFiScan
     void displayTargetFilter();
     void displayTransmitRate();
     void prepareScanStage(uint16_t color_1, uint16_t color_2);
-    void setLEDMode(int mode);
     void setWiFiMode(wifi_mode_t mode, wifi_promiscuous_cb_t cb);
     void writeNetworkInfo();
     void setupScanDisplayArea(uint16_t background, uint16_t color);
@@ -1126,6 +1125,7 @@ class WiFiScan
     void main(uint32_t currentTime);
     void StartScan(uint8_t scan_mode, uint16_t color = 0);
     void StopScan(uint8_t scan_mode);
+    void setLEDMode(int mode);
     void setBaseMacAddress(uint8_t macAddr[6]);
 
     uint16_t poiCount = 0;

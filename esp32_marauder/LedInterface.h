@@ -39,10 +39,17 @@ class LedInterface {
 
     uint8_t current_mode = MODE_OFF;
 
+    // millis()-based animation state (non-blocking, no delay() calls)
+    uint32_t last_anim_ms = 0;
+    uint16_t pulse_level = 30;
+    int8_t pulse_dir = 1;
+    bool blink_on = true;
+
     void rainbow();
     void ledOff();
-    void attackLed();
-    void sniffLed();
+    void attackLed(uint32_t currentTime);
+    void sniffLed(uint32_t currentTime);
+    void bleLed();
 
     #ifdef HAS_T_DONGLE_LED
       void writeApa102Color(uint8_t red, uint8_t green, uint8_t blue);
