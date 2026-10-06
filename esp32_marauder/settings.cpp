@@ -88,6 +88,8 @@ void Settings::_buildCache() {
       _cache.EPDeauth = json["Settings"][i]["value"].as<bool>();
     else if (strcmp(name, "ChanHop") == 0)
       _cache.ChanHop = json["Settings"][i]["value"].as<bool>();
+    else if (strcmp(name, "WebUI") == 0)
+      _cache.WebUI = json["Settings"][i]["value"].as<bool>();
     else if (strcmp(name, "ClientSSID") == 0)
       _cache.ClientSSID = json["Settings"][i]["value"].as<String>();
     else if (strcmp(name, "ClientPW") == 0)
@@ -267,6 +269,8 @@ template <> bool Settings::loadSetting<bool>(const char* key) {
     return _cache.EPDeauth;
   if (strcmp(key, "ChanHop") == 0)
     return _cache.ChanHop;
+  if (strcmp(key, "WebUI") == 0)
+    return _cache.WebUI;
 
   // Unknown bool key: fall back to JSON so the setting can be auto-created.
   DynamicJsonDocument json(JSON_SETTING_SIZE);
@@ -310,6 +314,9 @@ template <> uint8_t Settings::loadSetting<uint8_t>(const char* key) {
 
   if (strcmp(key, "ChanHop") == 0)
     return (uint8_t)_cache.ChanHop;
+
+  if (strcmp(key, "WebUI") == 0)
+    return (uint8_t)_cache.WebUI;
 
   DynamicJsonDocument json(JSON_SETTING_SIZE);
   deserializeJson(json, this->json_settings_string);
@@ -372,6 +379,8 @@ template <> bool Settings::saveSetting<bool>(const char* key, bool value) {
         _cache.EPDeauth = value;
       else if (strcmp(key, "ChanHop") == 0)
         _cache.ChanHop = value;
+      else if (strcmp(key, "WebUI") == 0)
+        _cache.WebUI = value;
 
       this->printJsonSettings(settings_string);
 
@@ -606,6 +615,13 @@ bool Settings::createDefaultSettings(fs::FS &fs, bool spec, uint8_t index, const
     jsonBuffer["Settings"][12].createNestedArray("value");
     jsonBuffer["Settings"][12]["range"]["min"] = 0;
     jsonBuffer["Settings"][12]["range"]["max"] = MAX_GEOFENCES;
+
+    // Next free index (13): web control auto-start, enabled by default.
+    jsonBuffer["Settings"][13]["name"] = "WebUI";
+    jsonBuffer["Settings"][13]["type"] = "bool";
+    jsonBuffer["Settings"][13]["value"] = true;
+    jsonBuffer["Settings"][13]["range"]["min"] = false;
+    jsonBuffer["Settings"][13]["range"]["max"] = true;
 
     serializeJson(jsonBuffer, settingsFile);
     serializeJson(jsonBuffer, settings_string);

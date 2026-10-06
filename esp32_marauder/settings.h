@@ -53,6 +53,7 @@ class Settings {
       bool  EnableLED     = true;
       bool  EPDeauth      = false;
       bool  ChanHop       = false;
+      bool  WebUI         = true;
       String ClientSSID   = "";
       String ClientPW     = "";
       String wu           = "";

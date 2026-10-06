@@ -300,6 +300,7 @@ void CommandLine::runCommand(String input) {
     
     // WiFi sniff/scan
     Serial.println(HELP_EVIL_PORTAL_CMD);
+    Serial.println(HELP_WEBUI_CMD);
     Serial.println(HELP_KARMA_CMD);
     Serial.println(HELP_PACKET_COUNT_CMD);
     Serial.println(HELP_PING_CMD);
@@ -975,6 +976,31 @@ void CommandLine::runCommand(String input) {
             evil_portal_obj.ap_index = target_ap_index;
           }
         }
+      }
+    }
+    // Web control server (serves :8080; the Evil Portal keeps :80)
+    else if (cmd_args.get(0) == WEBUI_CMD) {
+      int ap_sw = this->argSearch(&cmd_args, "-ap");
+      int sta_sw = this->argSearch(&cmd_args, "-sta");
+
+      String webui_command = cmd_args.size() > 1 ? cmd_args.get(1) : "";
+      uint8_t webui_mode = WEBUI_MODE_AP;
+      if (ap_sw != -1)
+        webui_mode = WEBUI_MODE_AP;
+      else if (sta_sw != -1)
+        webui_mode = WEBUI_MODE_STA;
+
+      if (webui_command == "start") {
+        webui_obj.start(webui_mode);
+      }
+      else if (webui_command == "stop") {
+        webui_obj.stop();
+      }
+      else if (webui_command == "status") {
+        webui_obj.status();
+      }
+      else {
+        Serial.println(HELP_WEBUI_CMD);
       }
     }
     else if (cmd_args.get(0) == SCAN_ALL_CMD) {

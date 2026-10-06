@@ -121,6 +121,7 @@ class EvilPortal {
     void cleanup();
     String get_user_name();
     String get_password();
+    bool isActive() const { return runServer; }
     bool setAP(String essid);
     bool setAPFromConfig();
     void setup();

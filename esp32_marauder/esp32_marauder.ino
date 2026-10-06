@@ -38,6 +38,7 @@ https://www.online-utility.org/image/convert/to/XBM
 #include "settings.h"
 #include "CommandLine.h"
 #include "ReconMission.h"
+#include "WebControl.h"
 #include "lang_var.h"
 
 #ifdef HAS_T_DONGLE_DISPLAY
@@ -80,6 +81,7 @@ Buffer buffer_obj;
 Settings settings_obj;
 CommandLine cli_obj;
 ReconMission recon_obj;
+WebControl webui_obj;
 
 #ifdef HAS_T_DONGLE_DISPLAY
   TDongleDisplay t_dongle_display;
@@ -414,6 +416,10 @@ void setup()
   wifi_scan_obj.StartScan(WIFI_SCAN_OFF);
   
   cli_obj.RunSetup();
+
+  // Web control last: it may bring up its own SoftAP and needs the CLI,
+  // settings and scan state above to be settled first.
+  webui_obj.setup();
 }
 
 
@@ -448,6 +454,7 @@ void loop()
   cli_obj.main(currentTime);
   wifi_scan_obj.main(currentTime);
   recon_obj.main(currentTime);
+  webui_obj.main();
 
   #ifdef HAS_T_DONGLE_DISPLAY
     t_dongle_display.update(currentTime, wifi_scan_obj);

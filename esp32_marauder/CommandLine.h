@@ -17,6 +17,7 @@
 #endif
 #include "settings.h"
 #include "ReconMission.h"
+#include "WebControl.h"
 #if defined(HAS_NEOPIXEL_LED)
   #include "LedInterface.h"
 #endif
@@ -33,6 +34,7 @@ extern WiFiScan wifi_scan_obj;
 #endif
 extern Settings settings_obj;
 extern ReconMission recon_obj;
+extern WebControl webui_obj;
 #if defined(HAS_NEOPIXEL_LED)
   extern LedInterface led_obj;
 #endif
@@ -72,6 +74,7 @@ const char PROGMEM RECON_CMD[] = "recon";
 
 // WiFi sniff/scan
 const char PROGMEM EVIL_PORTAL_CMD[] = "evilportal";
+const char PROGMEM WEBUI_CMD[] = "webui";
 const char PROGMEM KARMA_CMD[] = "karma";
 const char PROGMEM PACKET_COUNT_CMD[] = "packetcount";
 const char PROGMEM SIGSTREN_CMD[] = "foxhunt";
@@ -155,6 +158,7 @@ const char PROGMEM HELP_NMEA_CMD[] = "nmea";
 
 // WiFi sniff/scan
 const char PROGMEM HELP_EVIL_PORTAL_CMD[] = "evilportal [-c start [-w html.html]/sethtml <html.html>]";
+const char PROGMEM HELP_WEBUI_CMD[] = "webui start [-ap/-sta]/stop/status";
 const char PROGMEM HELP_KARMA_CMD[] = "karma -p <index>";
 const char PROGMEM HELP_PACKET_COUNT_CMD[] = "packetcount";
 const char PROGMEM HELP_SIGSTREN_CMD[] = "foxhunt -w <ap>/-s <ap> <station>/-b <ble>/-t <findmy>/-f <flipper>/-p <pineapple>/-m <multissid>";
