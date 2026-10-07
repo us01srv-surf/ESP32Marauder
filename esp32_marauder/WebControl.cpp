@@ -5,6 +5,17 @@
 #include <stdarg.h>  // P4: vsnprintf() arena formatter
 #include <string.h>  // P4: memcpy()/strlen() arena appends
 
+// ---------------------------------------------------------------------------
+// M-6: lwIP header for tcpip_callback(). The include style (extern "C" block,
+// quoted path) mirrors how the CI-pinned AsyncTCP v3.4.8 pulls in the same
+// header (AsyncTCP.cpp:43-50), so it resolves identically on every core in
+// the build matrix (arduino-esp32 2.0.11 and 3.3.4 both ship lwIP with
+// NO_SYS=0, i.e. tcpip_callback() present).
+// ---------------------------------------------------------------------------
+extern "C" {
+#include "lwip/tcpip.h"
+}
+
 #include "WiFiScan.h"
 #include "settings.h"
 #include "utils.h"
@@ -32,6 +43,65 @@
 
 extern WiFiScan wifi_scan_obj;
 extern CommandLine cli_obj;
+
+// ---------------------------------------------------------------------------
+// M-6 — the module's only two lwIP touchpoints, AsyncWebServer::begin() and
+// ::end() (thin wrappers over AsyncServer::begin()/end()), are marshalled
+// onto lwIP's tcpip thread with tcpip_callback() instead of being called
+// straight from the loop task.
+//
+// Why: AsyncServer::begin()/end() (pinned AsyncTCP v3.4.8,
+// AsyncTCP.cpp:1485/1527) issue direct tcp_* calls under a tcp_core_guard
+// (AsyncTCP.cpp:68-90) that compiles to an EMPTY struct when
+// CONFIG_LWIP_TCPIP_CORE_LOCKING is absent (AsyncTCP.cpp:86-89) — and it is
+// absent on the arduino-esp32 2.0.11 core that the S3/S2/C3/CYD/C6 CI jobs
+// build with (build_parallel.yml idf_ver, e.g. ESP32-S3 N16R8). On those
+// builds the direct call is an unsynchronized cross-thread lwIP call racing
+// the tcpip thread: "works most of the time" is luck, not design. Posting a
+// callback makes it execute on the tcpip thread itself, which is safe in BOTH
+// configurations:
+//   - core-locking builds (3.3.4, C5): tcp_core_guard's ctor skips
+//     LOCK_TCPIP_CORE() when the caller already is/holds the tcpip thread —
+//     do_lock(!sys_thread_tcpip(LWIP_CORE_LOCK_QUERY_HOLDER)),
+//     AsyncTCP.cpp:71 — so the marshalled call cannot self-deadlock (the
+//     tcpip thread takes LOCK_TCPIP_CORE() once at tcpip_esp.c:134 and runs
+//     the fetch/handle/callback at :142/:148/:201 with it held, releasing it
+//     only inside the mbox wait at :103-105). Uniform marshalled path, no
+//     #if split needed.
+//   - non-locking builds (2.0.11): there is no lock to miss, and the call now
+//     runs on lwIP's own thread anyway.
+//
+// Ordering: the tcpip mbox is FIFO — sys_mbox_post() appends
+// (tcpip_esp.c:329) and tcpip_thread() fetches in order (tcpip_esp.c:142) —
+// so a rapid `stop` -> `start` executes end() and only then begin(), even
+// when both were posted back-to-back from the same task. The void* argument
+// is always valid because HIGH-1 never deletes the server object. Everything
+// else in start()/stop() (state flags, arenas, AP, persistence) stays
+// synchronous; only the lwIP touchpoints become asynchronous.
+//
+// Callbacks must match lwIP's tcpip_callback_fn exactly — taking that type as
+// the parameter below makes the compiler check it on every build.
+// ---------------------------------------------------------------------------
+static void webuiTcpipBegin(void* arg) { static_cast<AsyncWebServer*>(arg)->begin(); }
+static void webuiTcpipEnd(void* arg)   { static_cast<AsyncWebServer*>(arg)->end(); }
+
+// Posts fn(server) to the tcpip thread. tcpip_callback() only fails with
+// ERR_MEM (no free tcpip_msg slot, tcpip_esp.c:321-323); we then run the
+// call inline in the loop task — the pre-M-6 behaviour — and say so on
+// serial. Honest ordering caveat: the inline fallback preserves order only
+// against ops this task posts LATER (it completes synchronously first); it
+// cannot overtake a message already sitting in the mbox. That corner needs
+// an earlier post still queued AND the TCPIP_MSG pool exhausted in the same
+// instant — lwIP is already failing allocations there — the alternation of
+// begin/end (guarded by running/stopping, so at most one message is ever
+// outstanding) plus the log line keep it visible. The normal path is strict
+// FIFO.
+static void webuiTcpipPost(tcpip_callback_fn fn, AsyncWebServer* srv) {
+  if (tcpip_callback(fn, srv) != ERR_OK) {
+    Serial.println(F("webui: tcpip_callback ENOMEM, direct lwIP call"));
+    fn(srv);
+  }
+}
 
 // Chip name reported by GET /api/v1/info. On the ESP32-S3 targets this is the
 // "ESP32-S3" of the P1 API contract; the other branches keep the field truthful
@@ -379,7 +449,11 @@ bool WebControl::start(uint8_t mode) {
     s_routes_registered = true;
   }
 
-  server->begin();
+  // Open the listen socket ON THE TCPIP THREAD (M-6): the bookkeeping above
+  // is already committed, and an end() queued by an earlier stop() executes
+  // before this begin() — mbox FIFO — so the listener state matches what
+  // start()/stop() recorded (see webuiTcpipPost for the ERR_MEM corner).
+  webuiTcpipPost(webuiTcpipBegin, server);
 
   running = true;
   stopping = false;
@@ -439,7 +513,11 @@ void WebControl::stop() {
     return;
   }
 
-  server->end();  // closes the listen socket only; clients survive
+  // Close the listen socket ON THE TCPIP THREAD (M-6) — clients on
+  // established connections survive; established requests keep draining.
+  // Asynchronous, but ordered: a later start()'s begin() is posted to the
+  // same FIFO mbox, so it cannot run before this end() (see webuiTcpipPost).
+  webuiTcpipPost(webuiTcpipEnd, server);
 
   if (owns_ap) {
     // Drop ONLY the AP interface — never the radio. initSoftAP() runs APSTA

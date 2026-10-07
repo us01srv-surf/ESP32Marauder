@@ -172,6 +172,11 @@ class WebControl {
     // stray extra decrement that parked the counter below 0 could only block
     // the teardown, never open it early (an unsigned counter would wrap to a
     // huge value instead — also blocking, but for the wrong reason).
+    // Balance is 1:1 by the CI-pinned library (lib-2, resolved M-5): v3.8.1
+    // forces `Connection: close` — one request per connection, no keep-alive
+    // reuse — and onDisconnect fires exactly once per request; this module
+    // uses no WebSocket/EventSource/pause paths, so trackReq()'s increment
+    // and the lambda's decrement can never skew.
     volatile int in_flight = 0;
     volatile bool running = false;
     volatile bool stopping = false;
