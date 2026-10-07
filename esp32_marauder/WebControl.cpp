@@ -2,6 +2,9 @@
 
 #include <WiFi.h>
 
+#include <stdarg.h>  // P4: vsnprintf() arena formatter
+#include <string.h>  // P4: memcpy()/strlen() arena appends
+
 #include "WiFiScan.h"
 #include "settings.h"
 #include "utils.h"
@@ -45,6 +48,149 @@ static uint8_t hexNib(char c) {
 // anything else to 0, so callers must gate on this first).
 static bool hexOk(char c) {
   return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+// ---------------------------------------------------------------------------
+// P4 list-snapshot helpers — loop task only (parseListQuery() runs in the
+// async_tcp task but only touches its own request). Every writer here is
+// bounds-checked against the PSRAM arena, so a build either produces a
+// complete, valid JSON document or reports failure and publishes nothing.
+// ---------------------------------------------------------------------------
+
+// Strict decimal parse: digits only, no sign, no whitespace, no empty string.
+// Rejecting rather than defaulting matters for `limit=abc` (spec: 400) while
+// an absent parameter never reaches this function at all.
+static bool parseU16(const String& s, uint16_t& out) {
+  if (s.length() == 0 || s.length() > 5)  // >5 digits can never fit uint16
+    return false;
+  uint32_t value = 0;
+  for (unsigned i = 0; i < s.length(); i++) {
+    const char c = s[i];
+    if (c < '0' || c > '9')
+      return false;
+    value = value * 10u + (uint32_t)(c - '0');
+    if (value > 65535UL)
+      return false;
+  }
+  out = (uint16_t)value;
+  return true;
+}
+
+// Bounded formatted append into the arena. Returns false when the text would
+// not fit, which also catches vsnprintf() truncation: the caller then stops
+// the build instead of publishing a document that was cut mid-field.
+static bool snapFmt(char* dst, size_t cap, size_t* len, const char* fmt, ...) {
+  if (*len >= cap)
+    return false;
+  va_list ap;
+  va_start(ap, fmt);
+  const int written = vsnprintf(dst + *len, cap - *len, fmt, ap);
+  va_end(ap);
+  if (written < 0 || (size_t)written >= cap - *len)
+    return false;
+  *len += (size_t)written;
+  return true;
+}
+
+// Bounded raw append (separator commas, quotes, the envelope tail). The
+// comparison leaves room for the terminating NUL at dst[*len].
+static bool snapRaw(char* dst, size_t cap, size_t* len, const char* text) {
+  const size_t n = strlen(text);
+  if (n == 0)
+    return true;
+  if (*len + n >= cap)
+    return false;
+  memcpy(dst + *len, text, n);
+  *len += n;
+  return true;
+}
+
+// Length of the UTF-8 sequence starting at s (avail bytes remain), or 0 when
+// the bytes are not a well-formed sequence (truncated, overlong, surrogate).
+// SSIDs are arbitrary bytes on the air, and a JSON document must be valid
+// UTF-8 or browsers refuse to JSON.parse() it at all.
+static size_t utf8Unit(const uint8_t* s, size_t avail) {
+  if (avail < 1)
+    return 0;
+  const uint8_t lead = s[0];
+  size_t n;
+  if ((lead & 0xE0) == 0xC0) {
+    n = 2;
+    if (lead < 0xC2) return 0;  // overlong
+  } else if ((lead & 0xF0) == 0xE0) {
+    n = 3;
+  } else if ((lead & 0xF8) == 0xF0) {
+    n = 4;
+    if (lead > 0xF4) return 0;  // > U+10FFFF
+  } else {
+    return 0;  // continuation byte without a lead, or 5/6-byte lead
+  }
+  if (n > avail)
+    return 0;
+  if (n == 3 && lead == 0xE0 && s[1] < 0xA0) return 0;        // overlong
+  if (n == 3 && lead == 0xED && s[1] >= 0xA0) return 0;       // UTF-16 surrogate
+  if (n == 4 && lead == 0xF0 && s[1] < 0x90) return 0;        // overlong
+  for (size_t i = 1; i < n; i++)
+    if ((s[i] & 0xC0) != 0x80)
+      return 0;
+  return n;
+}
+
+// Appends the *body* of a JSON string (the caller writes the quotes) into the
+// arena. SSIDs are arbitrary bytes, so:
+//   " and \   -> \" \\   (the two characters JSON requires escaped)
+//   < 0x20    -> '?'     (control characters are not representable)
+//   bad UTF-8 -> '?'     (one byte at a time, so one bad byte costs one '?')
+//   >= 0x80   -> copied through when it is a well-formed multi-byte sequence,
+//                so UTF-8 SSIDs survive unchanged
+// out_max caps the emitted length: a corrupt/over-long essid can never blow
+// the arena budget. Returns false only on arena overflow.
+static bool snapEsc(char* dst, size_t cap, size_t* len,
+                    const char* src, size_t src_len, size_t out_max) {
+  const size_t start = *len;
+  size_t i = 0;
+  while (i < src_len) {
+    char unit[4];
+    size_t unit_len = 1;
+    size_t consumed = 1;
+    const uint8_t c = (uint8_t)src[i];
+
+    if (c == '"' || c == '\\') {
+      unit[0] = '\\';
+      unit[1] = (char)c;
+      unit_len = 2;
+    }
+    else if (c < 0x20) {
+      unit[0] = '?';
+    }
+    else if (c < 0x80) {
+      unit[0] = (char)c;
+    }
+    else {
+      const size_t n = utf8Unit((const uint8_t*)src + i, src_len - i);
+      if (n == 0) {
+        unit[0] = '?';
+      }
+      else {
+        for (size_t k = 0; k < n; k++)
+          unit[k] = src[i + k];
+        unit_len = n;
+        consumed = n;
+      }
+    }
+
+    // Bound both ways before emitting: never run past the arena and never
+    // past out_max (a unit is never written partially, so truncation is
+    // always at a character boundary).
+    if (*len + unit_len >= cap)
+      return false;
+    if (*len - start + unit_len > out_max)
+      break;
+    memcpy(dst + *len, unit, unit_len);
+    *len += unit_len;
+    i += consumed;
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -118,6 +264,35 @@ bool WebControl::start(uint8_t mode) {
     s_routes_registered = false;
   }
 
+  // P4: the two snapshot arenas follow the server's lifetime — allocated on
+  // the first start(), freed only by the stage-2 teardown in main(). PSRAM
+  // first; targets without a PSRAM chip (most of the build matrix) fall back
+  // to DRAM so the list endpoints still work there. On any failure the pair
+  // is released together and the endpoints answer 503 LOW_HEAP instead of
+  // building into a null arena.
+  if (snap_buf[0] == nullptr || snap_buf[1] == nullptr) {
+    free(snap_buf[0]);
+    free(snap_buf[1]);
+    snap_buf[0] = nullptr;
+    snap_buf[1] = nullptr;
+    snap_buf[0] = (char*)ps_malloc(WEBUI_SNAP_BUF_SIZE);
+    snap_buf[1] = (char*)ps_malloc(WEBUI_SNAP_BUF_SIZE);
+    if (snap_buf[0] == nullptr)
+      snap_buf[0] = (char*)malloc(WEBUI_SNAP_BUF_SIZE);
+    if (snap_buf[1] == nullptr)
+      snap_buf[1] = (char*)malloc(WEBUI_SNAP_BUF_SIZE);
+    if (snap_buf[0] == nullptr || snap_buf[1] == nullptr) {
+      free(snap_buf[0]);
+      free(snap_buf[1]);
+      snap_buf[0] = nullptr;
+      snap_buf[1] = nullptr;
+      Serial.println(F("webui: snapshot arena alloc failed"));
+    }
+    // Nothing can be published into a freshly (re)built arena pair.
+    publish_idx = -1;
+    snap_want = false;
+  }
+
   if (!s_routes_registered) {
     server->on("/api/v1/info", HTTP_GET, [this](AsyncWebServerRequest* request) {
       this->handleInfo(request);
@@ -138,6 +313,25 @@ bool WebControl::start(uint8_t mode) {
     });
     server->on("/api/v1/cli", HTTP_POST, [this](AsyncWebServerRequest* request) {
       this->handleCli(request);
+    });
+
+    // P4 list endpoints: registered before the catch-all. The handlers never
+    // iterate a list — they replay a loop-task snapshot arena or queue the
+    // query and answer 503 SNAPSHOT_PENDING for the UI to retry.
+    server->on("/api/v1/aps", HTTP_GET, [this](AsyncWebServerRequest* request) {
+      this->handleList(request, LIST_APS, "aps");
+    });
+    server->on("/api/v1/stations", HTTP_GET, [this](AsyncWebServerRequest* request) {
+      this->handleList(request, LIST_STATIONS, "stations");
+    });
+    server->on("/api/v1/ssids", HTTP_GET, [this](AsyncWebServerRequest* request) {
+      this->handleList(request, LIST_SSIDS, "ssids");
+    });
+
+    // P4 reconciliation alias: same 128-byte CLI slot and marshaling as
+    // /api/v1/cli (see handleCmd for the body-format contract).
+    server->on("/api/v1/cmd", HTTP_POST, [this](AsyncWebServerRequest* request) {
+      this->handleCmd(request);
     });
 
     // Catch-all, registered LAST: 404 JSON for everything P1 does not expose.
@@ -282,6 +476,16 @@ void WebControl::main() {
 
   if (stopping) {
     if (in_flight == 0 && (millis() - end_time) >= WEBUI_DRAIN_MS) {
+      // P4: the snapshot arenas belong to the same lifecycle as the server.
+      // in_flight == 0 means no handler is inside tryServeSnapshot(), and a
+      // request that arrives from here on is shed by stop()'s STOPPING check
+      // before it ever reaches an arena — so no reader can still hold one.
+      publish_idx = -1;  // drop the published reference before freeing
+      snap_want = false;
+      free(snap_buf[0]);
+      snap_buf[0] = nullptr;
+      free(snap_buf[1]);
+      snap_buf[1] = nullptr;
       delete server;
       server = nullptr;
       stopping = false;
@@ -292,6 +496,11 @@ void WebControl::main() {
 
   if (!running)
     return;
+
+  // P4: build a queued list snapshot here, in the loop task. All list
+  // iteration (and any risk of the lists shrinking under us) stays in this
+  // task; the async_tcp task only ever reads a finished arena.
+  buildSnapshot();
 
   // P3 interface-recovery monitor (§5 v1): a scan/recon that ends can leave
   // the WiFi interface off (WiFiScan::shutdownWiFi() calls WiFi.mode(WIFI_OFF)).
@@ -521,7 +730,8 @@ void WebControl::handleRecon(AsyncWebServerRequest* request) {
 // POST /api/v1/cli?cmd=<urlencoded> — P3-lite. The command string is copied
 // into the fixed 128-byte slot and run by the loop task; its output stays on
 // serial (capturing it is out of scope). Commands longer than 127 bytes are
-// rejected, never truncated.
+// rejected, never truncated. Decoding/claiming lives in claimCliSlot(), which
+// the P4 /api/v1/cmd alias shares verbatim.
 void WebControl::handleCli(AsyncWebServerRequest* request) {
   trackReq(request);
   if (shedRequest(request, "cli"))
@@ -533,11 +743,53 @@ void WebControl::handleCli(AsyncWebServerRequest* request) {
     return;
   }
 
-  // Minimal %XX decode. ESPAsyncWebServer already decodes query parameters
-  // (WebRequest.cpp _addGetParams), so this is normally a no-op; it only
-  // fires for values that still carry a valid escape. Invalid escapes are
-  // copied through untouched, and a %XX that would not fit is an overflow.
-  const String& raw = cmd_param->value();
+  claimCliSlot(request, "cli", cmd_param->value());
+}
+
+// POST /api/v1/cmd — P4 reconciliation alias for the cross-lane contract: any
+// client that expects a `cmd` endpoint reaches the exact same 128-byte slot,
+// marshaling and error codes as /api/v1/cli (only the envelope's command
+// field differs: "cmd" instead of "cli").
+//
+// Body format: form-encoded, i.e. Content-Type:
+// application/x-www-form-urlencoded with a `cmd=...` field (or ?cmd=... on
+// the query string, which /api/v1/cli already accepts). A raw JSON body is
+// deliberately NOT supported: the vendored ESPAsyncWebServer v2.10.4 exposes
+// no public body reader on AsyncWebServerRequest (only the private _onData),
+// so a JSON body would have to go through a route-level body handler whose
+// on(uri, method, onRequest, onUpload, onBody) signature could not be
+// verified against CI's v3.8.1 — the least risky path is the parser the
+// library already runs for urlencoded bodies (WebRequest.cpp
+// _parsePlainPostChar), which is identical in both versions. UI: send the
+// command form-encoded.
+void WebControl::handleCmd(AsyncWebServerRequest* request) {
+  trackReq(request);
+  if (shedRequest(request, "cmd"))
+    return;
+
+  // Body parameter first (post=true), then the query string as a fallback.
+  const AsyncWebParameter* cmd_param = request->getParam("cmd", true);
+  if (cmd_param == nullptr)
+    cmd_param = request->getParam("cmd");
+  if (cmd_param == nullptr) {
+    sendError(request, "cmd", "BAD_PARAM", 400);
+    return;
+  }
+
+  claimCliSlot(request, "cmd", cmd_param->value());
+}
+
+// Shared P3 CLI-slot claim (called by handleCli and handleCmd): decodes %XX
+// escapes, enforces the 127-byte limit and publishes PEND_CLI for main().
+// Always sends exactly one response, using `command` ("cli"/"cmd") in the
+// envelope and the same codes as before: 400 BAD_PARAM, 503 BUSY.
+void WebControl::claimCliSlot(AsyncWebServerRequest* request,
+                              const char* command, const String& raw) {
+  // Minimal %XX decode. ESPAsyncWebServer already decodes query and
+  // form-body parameters (WebRequest.cpp: _addGetParams / _parsePlainPostChar),
+  // so this is normally a no-op; it only fires for values that still carry a
+  // valid escape. Invalid escapes are copied through untouched, and a %XX
+  // that would not fit is an overflow.
   char decoded[WEBUI_CLI_MAX];
   size_t out = 0;
   for (size_t i = 0; i < raw.length(); i++) {
@@ -552,7 +804,7 @@ void WebControl::handleCli(AsyncWebServerRequest* request) {
       value = c;
     }
     if (out + 1 >= sizeof(decoded)) {  // >127 decoded bytes
-      sendError(request, "cli", "BAD_PARAM", 400);
+      sendError(request, command, "BAD_PARAM", 400);
       return;
     }
     decoded[out++] = value;
@@ -560,12 +812,12 @@ void WebControl::handleCli(AsyncWebServerRequest* request) {
   decoded[out] = '\0';
 
   if (out == 0) {
-    sendError(request, "cli", "BAD_PARAM", 400);
+    sendError(request, command, "BAD_PARAM", 400);
     return;
   }
 
   if (pending_set) {
-    sendError(request, "cli", "BUSY", 503);
+    sendError(request, command, "BUSY", 503);
     return;
   }
 
@@ -574,7 +826,126 @@ void WebControl::handleCli(AsyncWebServerRequest* request) {
   pending.arg = 0;
   pending.kind = PendingAction::PEND_CLI;
   pending_set = true;
-  sendAccepted(request, "cli");
+  sendAccepted(request, command);
+}
+
+// ---------------------------------------------------------------------------
+// P4 list endpoints — GET /api/v1/{aps,stations,ssids}?offset=<n>&limit=<n>
+//
+// The handler does zero list iteration: it either replays the arena the loop
+// task already published for this exact query (and a copy is made inside this
+// call, so the arena is free again before send() returns), or it queues the
+// query and answers 503 SNAPSHOT_PENDING. P1 pollers already retry on that
+// code, so the client sees at most one extra round trip per rebuild.
+// ---------------------------------------------------------------------------
+
+void WebControl::handleList(AsyncWebServerRequest* request, ListKind kind,
+                            const char* command) {
+  trackReq(request);
+  if (shedRequest(request, command))
+    return;
+
+  // Both arenas are needed (the builder must not reuse the published one).
+  if (snap_buf[0] == nullptr || snap_buf[1] == nullptr) {
+    sendError(request, command, "LOW_HEAP", 503);
+    return;
+  }
+
+  uint16_t offset = 0;
+  uint16_t limit = WEBUI_LIST_LIMIT_DEFAULT;
+  if (!parseListQuery(request, command, offset, limit))
+    return;  // 400 BAD_PARAM already sent
+
+  if (tryServeSnapshot(request, command, kind, offset, limit))
+    return;  // 200 (or 503 LOW_HEAP) already sent
+
+  queueSnapshot(kind, offset, limit);
+  sendError(request, command, "SNAPSHOT_PENDING", 503);
+}
+
+// offset/limit parsing: absent -> default (200-bound, never an error);
+// present but empty, signed, non-decimal or > 65535 -> 400 BAD_PARAM;
+// limit > WEBUI_LIST_LIMIT_MAX -> 400 BAD_PARAM.
+bool WebControl::parseListQuery(AsyncWebServerRequest* request,
+                                const char* command,
+                                uint16_t& offset, uint16_t& limit) {
+  const AsyncWebParameter* p = request->getParam("offset");
+  if (p != nullptr && !parseU16(p->value(), offset)) {
+    sendError(request, command, "BAD_PARAM", 400);
+    return false;
+  }
+
+  p = request->getParam("limit");
+  if (p != nullptr) {
+    uint16_t parsed = 0;
+    if (!parseU16(p->value(), parsed) || parsed > WEBUI_LIST_LIMIT_MAX) {
+      sendError(request, command, "BAD_PARAM", 400);
+      return false;
+    }
+    limit = parsed;
+  }
+  return true;
+}
+
+// Reads the published arena for this query, if it is a match, fresh and
+// covered by every build requested so far. Returns true once a response has
+// been sent (200 on success, 503 LOW_HEAP if the DRAM copy would not fit).
+//
+// snap_reading is raised BEFORE publish_idx is read — buildSnapshot() relies
+// on exactly that order (its L1/L3 pair), which is what keeps a build from
+// choosing the very arena this handler is copying out of.
+bool WebControl::tryServeSnapshot(AsyncWebServerRequest* request,
+                                  const char* command, ListKind kind,
+                                  uint16_t offset, uint16_t limit) {
+  const uint32_t need = snap_req_seq;
+
+  snap_reading = true;                 // H0: flag first...
+  __sync_synchronize();                // release: flag globally visible before H1
+  const int idx = publish_idx;         // H1: ...then the index
+  __sync_synchronize();                // acquire: metadata/arena precede the index
+  const bool match =
+      (idx >= 0 && idx <= 1) &&
+      (snap_buf[idx] != nullptr) &&
+      (pub_kind == kind) &&
+      (pub_offset == offset) &&
+      (pub_limit == limit) &&
+      (pub_len > 0) &&
+      (pub_len <= WEBUI_SNAP_BUF_SIZE) &&
+      (pub_seq >= need) &&
+      ((uint32_t)(millis() - snap_built_ms) < WEBUI_SNAP_FRESH_MS);
+
+  if (!match) {
+    snap_reading = false;
+    return false;
+  }
+
+  const uint16_t len = pub_len;
+  String body(snap_buf[idx]);  // copy out of PSRAM into DRAM
+  snap_reading = false;        // the arena is no longer referenced
+
+  if (body.length() != len) {  // allocation failed (or a torn length)
+    sendError(request, command, "LOW_HEAP", 503);
+    return true;
+  }
+
+  request->send(200, "application/json", body);
+  return true;
+}
+
+// Handler -> loop task hand-off: write the query only while snap_want is
+// down (buildSnapshot() only reads it while the flag is up), then raise the
+// flag. A second request that arrives while a build is already queued leaves
+// both the fields and the flag alone — its own retry queues it afterwards,
+// and until then it gets SNAPSHOT_PENDING, which is exactly what is true.
+void WebControl::queueSnapshot(ListKind kind, uint16_t offset, uint16_t limit) {
+  if (snap_want)
+    return;
+  snap_kind = kind;
+  snap_offset = offset;
+  snap_limit = limit;
+  snap_req_seq++;
+  __sync_synchronize();  // release: the whole query is visible before the flag
+  snap_want = true;  // publish the request after the payload is complete
 }
 
 void WebControl::handleNotFound(AsyncWebServerRequest* request) {
@@ -678,6 +1049,224 @@ void WebControl::consumePending() {
     default:
       break;
   }
+}
+
+// ---------------------------------------------------------------------------
+// P4 snapshot builder — loop task only (called from main()). One builder,
+// serialized by main(), so two builds can never overlap. The arena pair
+// makes the cross-task invariant cheap: publish_idx names the arena the
+// async_tcp task may read, and this function only ever writes the other one.
+// ---------------------------------------------------------------------------
+
+// Builds the query queueSnapshot() left behind. Returns true when a new
+// snapshot was published.
+//
+// The L1/L3 ordering below is the whole safety argument, so it must not be
+// reordering-friendly:
+//   L1 read publish_idx and derive the arena to write (1 - publish_idx);
+//   L3 then test snap_reading, and bail out if a handler is reading.
+// A handler raises snap_reading (H0) *before* it reads publish_idx (H1), so
+// for any handler we either abort here (flag still up), or it observed
+// publish_idx before we changed it — in which case it reads `pub` while we
+// write 1-pub — or it observed the index only after our publish, by which
+// time this build is finished and its next build hits L3 with the flag up.
+// In every interleaving the arena being written stays unread.
+bool WebControl::buildSnapshot() {
+  if (!snap_want)
+    return false;  // fast path: no request pending (most loop passes)
+
+  // L1: read publish_idx FIRST...
+  const int pub = publish_idx;
+  const int target = (pub == 0) ? 1 : 0;  // the non-published arena
+  __sync_synchronize();  // order L1 strictly before L3 (two cores, two loads)
+
+  // L3: ...check the reader flag SECOND (see the ordering note above).
+  if (snap_reading)
+    return false;  // a handler is copying: keep snap_want, retry next pass
+
+  if (snap_buf[0] == nullptr || snap_buf[1] == nullptr)
+    return false;
+
+  __sync_synchronize();  // acquire: the query the handler wrote before the flag
+  // Copy the query out first, then lower the flag (same hand-off as `pending`).
+  const ListKind kind = snap_kind;
+  const uint16_t offset = snap_offset;
+  const uint16_t limit = snap_limit;
+  const uint32_t req = snap_req_seq;
+  snap_want = false;
+
+  // Build guard: never spend DRAM the boot path needs. Skipping here is
+  // deliberate — nothing is published, so the client's next poll re-queues.
+  if (ESP.getFreeHeap() < (uint32_t)MEM_LOWER_LIM + WEBUI_LOW_HEAP_MARGIN)
+    return false;
+
+  char* dst = snap_buf[target];
+  size_t len = 0;
+  bool ok = false;
+  switch (kind) {
+    case LIST_APS:
+      ok = buildAps(dst, WEBUI_SNAP_BUF_SIZE, &len, offset, limit);
+      break;
+    case LIST_STATIONS:
+      ok = buildStations(dst, WEBUI_SNAP_BUF_SIZE, &len, offset, limit);
+      break;
+    case LIST_SSIDS:
+      ok = buildSsids(dst, WEBUI_SNAP_BUF_SIZE, &len, offset, limit);
+      break;
+    default:
+      break;
+  }
+  if (!ok)
+    return false;  // overflow/empty build: nothing published, keep the old one
+  dst[len] = '\0'; // builders reserve 16 B + WEBUI_SNAP_ENTRY_ROOM, so len < cap
+
+  // Metadata first, index last: publish_idx is the release flag for readers.
+  pub_kind = kind;
+  pub_offset = offset;
+  pub_limit = limit;
+  pub_len = (uint16_t)len;
+  pub_seq = req;
+  snap_seq++;
+  snap_built_ms = millis();
+  __sync_synchronize();  // payload + metadata visible before the index
+  publish_idx = target;
+  return true;
+}
+
+// GET /api/v1/aps payload. Fields come from the same LinkedList<AccessPoint>
+// walk the CLI's `list -a` does (CommandLine.cpp:1657): value-copy per entry,
+// size re-checked every iteration because the WiFi-task sniffer callback and
+// `clearlist` can append/trim the list while we walk it. `total` comes from
+// the public accessor (WiFiScan.h:846), which is literally access_points->
+// size() (WiFiScan.cpp:46), so a list that grows between the two reads only
+// makes the walk conservative.
+bool WebControl::buildAps(char* dst, size_t cap, size_t* len,
+                          uint16_t offset, uint16_t limit) {
+  *len = 0;
+  // Every write below targets `lim`, which reserves the last 16 bytes for the
+  // closing "]}}" — so a build can never fail on its own tail, and a document
+  // that cannot be closed is impossible by construction.
+  const size_t lim = (cap > 16) ? cap - 16 : cap;
+  const unsigned total =
+      (unsigned)wifi_scan_obj.retainedAccessPointCount();
+
+  if (!snapFmt(dst, lim, len,
+               "{\"protocol\":1,\"command\":\"aps\",\"status\":\"ok\","
+               "\"data\":{\"total\":%u,\"offset\":%u,\"limit\":%u,\"aps\":[",
+               total, (unsigned)offset, (unsigned)limit))
+    return false;
+
+  unsigned emitted = 0;
+  for (unsigned i = offset; i < total && emitted < limit; i++) {
+    if (access_points == nullptr || i >= (unsigned)access_points->size())
+      break;  // list shrank under us (clearlist) — stop at a real boundary
+    if (lim - *len < WEBUI_SNAP_ENTRY_ROOM)
+      break;  // no room for a whole entry: close the array instead
+            // (the arena is sized for a full page, so this is belt-and-braces)
+
+    const AccessPoint ap = access_points->get((int)i);
+    char bssid[18];
+    // Uppercase AA:BB:.. — the same helper macToString()/`info -a` use, so
+    // the BSSID matches GET /api/v1/info's "mac" formatting.
+    marauder::formatMacAddress(ap.bssid, bssid);
+
+    if (emitted != 0 && !snapRaw(dst, lim, len, ","))
+      return false;
+    if (!snapFmt(dst, lim, len, "{\"ssid\":\""))
+      return false;
+    // Arbitrary bytes, 64-byte output budget (= a 32-char SSID that is all
+    // quotes) so one corrupt essid cannot eat the page.
+    if (!snapEsc(dst, lim, len, ap.essid.c_str(), ap.essid.length(), 64))
+      return false;
+    if (!snapFmt(dst, lim, len,
+                 "\",\"bssid\":\"%s\",\"ch\":%u,\"rssi\":%d,\"sec\":%u,"
+                 "\"stas\":%u,\"pkts\":%u}",
+                 bssid, (unsigned)ap.channel, (int)ap.rssi, (unsigned)ap.sec,
+                 (unsigned)(ap.stations == nullptr ? 0 : ap.stations->size()),
+                 (unsigned)ap.packets))
+      return false;
+    emitted++;
+  }
+
+  return snapRaw(dst, cap, len, "]}}");  // real cap: the 16-byte reserve
+}
+
+// GET /api/v1/stations payload. Only two fields of struct Station (utils.h:20)
+// are actually readable: "mac" and "pkts". Omitted on purpose — "vendor"
+// (no public OUI->vendor lookup exists; WiFiScan::suspicious_vendors[] is
+// private at WiFiScan.h:557) and "probed" (Station carries no probe data;
+// probe_req_ssids is keyed by SSID, not by station).
+bool WebControl::buildStations(char* dst, size_t cap, size_t* len,
+                               uint16_t offset, uint16_t limit) {
+  *len = 0;
+  const size_t lim = (cap > 16) ? cap - 16 : cap;  // reserve the "]}}" tail
+  const unsigned total =
+      (unsigned)wifi_scan_obj.retainedStationCount();  // WiFiScan.h:847
+
+  if (!snapFmt(dst, lim, len,
+               "{\"protocol\":1,\"command\":\"stations\",\"status\":\"ok\","
+               "\"data\":{\"total\":%u,\"offset\":%u,\"limit\":%u,\"stations\":[",
+               total, (unsigned)offset, (unsigned)limit))
+    return false;
+
+  unsigned emitted = 0;
+  for (unsigned i = offset; i < total && emitted < limit; i++) {
+    if (stations == nullptr || i >= (unsigned)stations->size())
+      break;
+    if (lim - *len < WEBUI_SNAP_ENTRY_ROOM)
+      break;
+
+    const Station st = stations->get((int)i);
+    char mac[18];
+    marauder::formatMacAddress(st.mac, mac);
+
+    if (emitted != 0 && !snapRaw(dst, lim, len, ","))
+      return false;
+    if (!snapFmt(dst, lim, len, "{\"mac\":\"%s\",\"pkts\":%u}",
+                 mac, (unsigned)st.packets))
+      return false;
+    emitted++;
+  }
+
+  return snapRaw(dst, cap, len, "]}}");  // real cap: the 16-byte reserve
+}
+
+// GET /api/v1/ssids payload: the retained SSID list `list -s` prints
+// (CommandLine.cpp:1701, extern at CommandLine.h:45) — strings only, exactly
+// the shape the contract asks for: data = {total, ssids}. total is the whole
+// list size so the client can page with offset/limit.
+bool WebControl::buildSsids(char* dst, size_t cap, size_t* len,
+                            uint16_t offset, uint16_t limit) {
+  *len = 0;
+  const size_t lim = (cap > 16) ? cap - 16 : cap;  // reserve the "]}}" tail
+  const unsigned total = (ssids == nullptr) ? 0U : (unsigned)ssids->size();
+
+  if (!snapFmt(dst, lim, len,
+               "{\"protocol\":1,\"command\":\"ssids\",\"status\":\"ok\","
+               "\"data\":{\"total\":%u,\"ssids\":[",
+               total))
+    return false;
+
+  unsigned emitted = 0;
+  for (unsigned i = offset; i < total && emitted < limit; i++) {
+    if (ssids == nullptr || i >= (unsigned)ssids->size())
+      break;
+    if (lim - *len < WEBUI_SNAP_ENTRY_ROOM)
+      break;
+
+    const ssid entry = ssids->get((int)i);
+    if (emitted != 0 && !snapRaw(dst, lim, len, ","))
+      return false;
+    if (!snapRaw(dst, lim, len, "\""))
+      return false;
+    if (!snapEsc(dst, lim, len, entry.essid.c_str(), entry.essid.length(), 64))
+      return false;
+    if (!snapRaw(dst, lim, len, "\""))
+      return false;
+    emitted++;
+  }
+
+  return snapRaw(dst, cap, len, "]}}");  // real cap: the 16-byte reserve
 }
 
 // ---------------------------------------------------------------------------

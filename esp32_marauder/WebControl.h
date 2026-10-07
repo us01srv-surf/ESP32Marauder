@@ -35,6 +35,25 @@
 // every 2 s, so a scan/recon that toggles the radio cannot cause a thrash.
 #define WEBUI_IFACE_CHECK_MS 2000
 
+// P4: size of one list-snapshot arena (two of them, PSRAM). Worst-case body
+// is the AP page: 50 entries x 160 B (95 B fixed + 64 B escaped SSID) + a
+// ~95 B envelope = ~8.1 KB, so 6 KB would truncate — 8 KB holds a full page.
+#define WEBUI_SNAP_BUF_SIZE 8192
+
+// P4: list pagination. limit defaults to 20 and is hard-capped at 50 so a
+// single loop-task build stays bounded; a bigger limit is 400 BAD_PARAM.
+#define WEBUI_LIST_LIMIT_DEFAULT 20
+#define WEBUI_LIST_LIMIT_MAX     50
+
+// P4: how long a published snapshot stays servable before the handler asks
+// the loop task for a fresh one (the UI polls, so a rebuild follows at once).
+#define WEBUI_SNAP_FRESH_MS 2000
+
+// P4: bytes held back while building, so the envelope tail ("]}}") always
+// fits. It is also larger than the biggest single entry (160 B), so an entry
+// can never be cut in half by the bound check that uses it.
+#define WEBUI_SNAP_ENTRY_ROOM 256
+
 class WebControl {
   public:
     void setup();
@@ -61,6 +80,26 @@ class WebControl {
     void handleRecon(AsyncWebServerRequest* request);
     void handleCli(AsyncWebServerRequest* request);
     void handleNotFound(AsyncWebServerRequest* request);
+
+    // P4 list endpoints. All list iteration happens in the loop task; these
+    // handlers only replay a finished snapshot arena or queue the query.
+    enum ListKind : uint8_t { LIST_APS = 0, LIST_STATIONS = 1, LIST_SSIDS = 2 };
+
+    void handleList(AsyncWebServerRequest* request, ListKind kind,
+                    const char* command);
+    void handleCmd(AsyncWebServerRequest* request);
+    // Parses offset/limit. Missing params keep their defaults (never an
+    // error); anything non-numeric, negative, or above the cap is 400.
+    bool parseListQuery(AsyncWebServerRequest* request, const char* command,
+                        uint16_t& offset, uint16_t& limit);
+    // True when the response (200 replay or 503 LOW_HEAP) was already sent.
+    bool tryServeSnapshot(AsyncWebServerRequest* request, const char* command,
+                          ListKind kind, uint16_t offset, uint16_t limit);
+    void queueSnapshot(ListKind kind, uint16_t offset, uint16_t limit);
+    // Shared P3 CLI-slot claim so /api/v1/cli and the P4 /api/v1/cmd alias
+    // decode, bound and marshal through the exact same 128-byte slot.
+    void claimCliSlot(AsyncWebServerRequest* request, const char* command,
+                      const String& raw);
 
     // P3 marshaling: route handlers (async_tcp task) publish exactly one
     // pending action into this slot; main() (loop task) consumes it. The
@@ -90,6 +129,16 @@ class WebControl {
     void monitorIface();
     void recoverIface();
 
+    // P4 loop-task side: builds one queued query into the NON-published arena
+    // and publishes it. Called only from main(), so builds are serialized.
+    bool buildSnapshot();
+    bool buildAps(char* dst, size_t cap, size_t* len,
+                  uint16_t offset, uint16_t limit);
+    bool buildStations(char* dst, size_t cap, size_t* len,
+                       uint16_t offset, uint16_t limit);
+    bool buildSsids(char* dst, size_t cap, size_t* len,
+                    uint16_t offset, uint16_t limit);
+
     // Loop-task only: caches IP/mode/mac so route handlers never call WiFi.
     void refreshNetCache();
     // Brings the SoftAP up (mode -> softAPConfig -> softAP). Does not touch
@@ -109,6 +158,35 @@ class WebControl {
     // P3 pending-action slot (written by handlers, consumed by main()).
     PendingAction pending;
     volatile bool pending_set = false;
+
+    // P4 double-buffered list snapshot. The arenas are allocated on the
+    // first start() and freed only by the stage-2 teardown in main() (which
+    // runs with in_flight == 0, i.e. no handler inside tryServeSnapshot()).
+    // publish_idx is the arena the async_tcp task may read; the loop task
+    // only ever writes 1 - publish_idx, and publish_idx is updated last.
+    char* snap_buf[2] = {nullptr, nullptr};
+    volatile int publish_idx = -1;     // -1 = nothing published yet
+    volatile uint32_t snap_seq = 0;    // publishes so far
+    volatile uint32_t snap_built_ms = 0;
+    // Query hand-off, handler -> loop task: the fields are only written while
+    // snap_want is down, and only read while it is up (same pattern as
+    // `pending`), so a build never observes a torn query.
+    volatile bool snap_want = false;
+    volatile ListKind snap_kind = LIST_APS;
+    volatile uint16_t snap_offset = 0;
+    volatile uint16_t snap_limit = WEBUI_LIST_LIMIT_DEFAULT;
+    volatile uint32_t snap_req_seq = 0;  // queued builds; see queueSnapshot()
+    // Metadata of the published arena; written before publish_idx.
+    volatile ListKind pub_kind = LIST_APS;
+    volatile uint16_t pub_offset = 0;
+    volatile uint16_t pub_limit = 0;
+    volatile uint16_t pub_len = 0;
+    volatile uint32_t pub_seq = 0;
+    // Raised by a handler for as long as it reads a published arena. One flag
+    // is enough: every handler runs in the single async_tcp task, and the
+    // builder tests it between reading publish_idx and choosing its arena
+    // (the L1/L3 ordering documented in buildSnapshot()).
+    volatile bool snap_reading = false;
 
     // Loop-task state.
     bool owns_ap = false;
