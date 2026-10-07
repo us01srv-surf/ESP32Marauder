@@ -301,6 +301,9 @@ jobs:
         if: matrix.board.flag == 'MARAUDER_T_DONGLE_C5'
         run: cp installer/partitions/t_dongle_c5.csv esp32_marauder/partitions.csv
 
+      - name: Generate embedded web UI (webui_data.h)
+        run: python3 tools/embed_webui.py
+
       - name: Build Marauder for ${{ matrix.board.name }}
         uses: ArminJo/arduino-test-compile@v3.3.0
         with:
