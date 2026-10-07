@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#07090b">
+<meta name="color-scheme" content="dark">
+<meta name="format-detection" content="telephone=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Marauder</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='7' fill='none' stroke='%2325e07f' stroke-width='2'/%3E%3Cpath d='M12 2v5M12 17v5M2 12h5M17 12h5' stroke='%2325e07f' stroke-width='2'/%3E%3Ccircle cx='12' cy='12' r='2' fill='%2325e07f'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<svg class="spr" aria-hidden="true" focusable="false">
+<symbol id="i-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="6.5"/><path d="M12 2.5v4M12 17.5v4M2.5 12h4M17.5 12h4"/><circle cx="12" cy="12" r="1.7" fill="currentColor" stroke="none"/></symbol>
+<symbol id="i-dash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 17a8 8 0 1 1 16 0"/><path d="M12 17l4.2-5.2"/><circle cx="12" cy="17" r="1.6" fill="currentColor" stroke="none"/></symbol>
+<symbol id="i-wifi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M3.5 9.2a13 13 0 0 1 17 0M6.6 12.6a8.5 8.5 0 0 1 10.8 0M9.7 16a4 4 0 0 1 4.6 0"/><circle cx="12" cy="19.4" r="1.5" fill="currentColor" stroke="none"/></symbol>
+<symbol id="i-bt" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7l10 10-5 4V3l5 4L7 17"/></symbol>
+<symbol id="i-ctrl" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 7h8M17 7h3M4 12h3M12 12h8M4 17h10M19 17h1"/><circle cx="14.5" cy="7" r="2.2"/><circle cx="9.5" cy="12" r="2.2"/><circle cx="16.5" cy="17" r="2.2"/></symbol>
+<symbol id="i-cli" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="M7.2 10l3.3 3-3.3 3M13 16h4"/></symbol>
+<symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.2l11 6.8L8 18.8z" fill="currentColor"/></symbol>
+<symbol id="i-stop" viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="1.5" fill="currentColor"/></symbol>
+<symbol id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></symbol>
+<symbol id="i-sync" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 0 1-13.7 5.6L4 15.4"/><path d="M4 12a8 8 0 0 1 13.7-5.6L20 8.6"/><path d="M4 20.5v-5h5M20 3.5v5h-5"/></symbol>
+<symbol id="i-wave" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12h3l2-6.5L10.5 18l2.6-9 1.9 5.5h6.5"/></symbol>
+<symbol id="i-gate" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5.5 20.5V4.5a1 1 0 0 1 1-1h11a1 1 0 0 1 1 1v16"/><path d="M3 20.5h18M14.5 12.4v1.4"/></symbol>
+</svg>
+
+<header class="hdr">
+  <a class="brand" href="#/dash"><svg class="ic mk" aria-hidden="true"><use href="#i-mark"/></svg><span>MARAUDER</span></a>
+  <div class="hdr-r">
+    <span class="pill dim" id="mpill" hidden>&mdash;</span>
+    <span class="pill warn" id="link"><span class="dot"></span><span id="linkT">LINK</span></span>
+  </div>
+</header>
+
+<div class="banner" id="banner" hidden role="status"><span class="dot"></span><span id="bannerT">DEVICE UNREACHABLE &middot; RETRYING</span></div>
+
+<main id="main">
+
+  <!-- DASHBOARD -->
+  <section class="view" id="v-dash">
+    <div class="panel hero">
+      <div class="h-top"><span class="lbl">SCAN STATE</span><span class="prog" aria-hidden="true"></span></div>
+      <div class="h-state" id="dState">IDLE</div>
+      <div class="h-sub" id="dSub">no scan running</div>
+      <div class="cnts">
+        <div class="cnt"><span class="lbl">ACCESS POINTS</span><b class="num" id="dAp">&mdash;</b></div>
+        <div class="cnt"><span class="lbl">STATIONS</span><b class="num" id="dSt">&mdash;</b></div>
+      </div>
+    </div>
+
+    <div class="btns">
+      <button class="btn pri" data-cmd="scan -a"><svg class="ic" aria-hidden="true"><use href="#i-wifi"/></svg>WIFI SCAN</button>
+      <button class="btn" data-cmd="scan -b"><svg class="ic" aria-hidden="true"><use href="#i-bt"/></svg>BLE SCAN</button>
+      <button class="btn dgr" data-cmd="stopscan"><svg class="ic" aria-hidden="true"><use href="#i-stop"/></svg>STOP</button>
+    </div>
+
+    <div class="panel">
+      <div class="ptitle">MEMORY</div>
+      <div class="meter" id="heap" title="heap free, relative to 256 KB reference"></div>
+      <div class="rline"><span class="lbl">HEAP FREE</span><b class="mono" id="iHeap">&mdash;</b></div>
+      <div class="rline"><span class="lbl">PSRAM</span><b class="mono" id="iPsram">&mdash;</b></div>
+    </div>
+
+    <div class="panel">
+      <div class="ptitle">DEVICE</div>
+      <dl class="kv">
+        <div><dt>CHIP</dt><dd id="iChip">&mdash;</dd></div>
+        <div><dt>FIRMWARE</dt><dd id="iFw">&mdash;</dd></div>
+        <div><dt>MAC</dt><dd class="mono" id="iMac">&mdash;</dd></div>
+        <div><dt>MODE</dt><dd id="iMode">&mdash;</dd></div>
+        <div><dt>IP</dt><dd class="mono" id="iIp">&mdash;</dd></div>
+      </dl>
+      <p class="foot">polling every 2 s &middot; paused when tab is hidden</p>
+    </div>
+  </section>
+
+  <!-- WIFI SCAN -->
+  <section class="view" id="v-wifi">
+    <div class="tb">
+      <div class="seg" id="wTabs" role="group" aria-label="list type">
+        <button class="on" data-tab="aps" type="button">APS <b id="cAps">0</b></button>
+        <button data-tab="sts" type="button">STATIONS <b id="cSts">0</b></button>
+      </div>
+      <button class="chip" id="wSort" type="button" title="sort field / direction">RSSI &darr;</button>
+    </div>
+
+    <div class="btns two">
+      <button class="btn pri" id="wGo" data-cmd="scan -a" type="button">SCAN APS</button>
+      <button class="btn dgr" data-cmd="stopscan" type="button"><svg class="ic" aria-hidden="true"><use href="#i-stop"/></svg>STOP</button>
+    </div>
+
+    <div class="list" id="wList"></div>
+  </section>
+
+  <!-- BLE SCAN -->
+  <section class="view" id="v-ble">
+    <div class="panel strip">
+      <span class="dot" id="bDot"></span>
+      <b id="bState">IDLE</b>
+      <span class="sp"></span>
+      <span class="mono dim" id="bType">type &mdash;</span>
+    </div>
+
+    <div class="btns three">
+      <button class="btn pri" id="bGo" data-cmd="recon ble" type="button"><svg class="ic" aria-hidden="true"><use href="#i-play"/></svg>RECON BLE</button>
+      <button class="btn" data-cmd="scan -b" type="button">SCAN DEVICES</button>
+      <button class="btn dgr" data-cmd="stopscan" type="button"><svg class="ic" aria-hidden="true"><use href="#i-stop"/></svg>STOP</button>
+    </div>
+
+    <div class="panel note" id="bNote" hidden>BLE list endpoint not available in this firmware. Scan state and controls below remain live.</div>
+
+    <div class="list" id="bList"></div>
+  </section>
+
+  <!-- CONTROL -->
+  <section class="view" id="v-ctrl">
+    <div class="panel grp">
+      <div class="ptitle"><svg class="ic" aria-hidden="true"><use href="#i-sync"/></svg>SCAN</div>
+      <div class="btns">
+        <button class="btn pri" data-cmd="scan -a" type="button">SCAN APS</button>
+        <button class="btn" data-cmd="scan -t" type="button">SCAN STATIONS</button>
+        <button class="btn" data-cmd="scan -b" type="button">SCAN BLE</button>
+        <button class="btn" data-cmd="scanall" type="button">SCAN ALL</button>
+      </div>
+    </div>
+
+    <div class="panel grp">
+      <div class="ptitle"><svg class="ic" aria-hidden="true"><use href="#i-play"/></svg>RECON</div>
+      <div class="btns">
+        <button class="btn pri" data-cmd="recon wifi" type="button">RECON WIFI</button>
+        <button class="btn" data-cmd="recon ble" type="button">RECON BLE</button>
+        <button class="btn dgr" data-cmd="stopscan" type="button"><svg class="ic" aria-hidden="true"><use href="#i-stop"/></svg>STOP SCAN</button>
+      </div>
+    </div>
+
+    <div class="panel grp">
+      <div class="ptitle"><svg class="ic" aria-hidden="true"><use href="#i-wave"/></svg>SNIFF</div>
+      <div class="btns">
+        <button class="btn" data-cmd="sniffpmkid" type="button">PMKID</button>
+        <button class="btn" data-cmd="sniffdeauth" type="button">DEAUTH</button>
+        <button class="btn" data-cmd="sniffbeacon" type="button">BEACON</button>
+        <button class="btn" data-cmd="sniffprobe" type="button">PROBE</button>
+      </div>
+    </div>
+
+    <div class="panel grp">
+      <div class="ptitle"><svg class="ic" aria-hidden="true"><use href="#i-gate"/></svg>EVIL PORTAL</div>
+      <div class="btns">
+        <button class="btn pri" data-cmd="evilportal -c start" type="button">START PORTAL</button>
+        <button class="btn dgr" data-cmd="evilportal -c stop" type="button">STOP PORTAL</button>
+      </div>
+      <p class="foot">commands run on the device &middot; output lands in the CLI log</p>
+    </div>
+  </section>
+
+  <!-- CLI -->
+  <section class="view" id="v-cli">
+    <div class="ctop">
+      <div class="ptitle">OUTPUT</div>
+      <button class="ibtn" id="clearLog" type="button" aria-label="clear log" title="clear log"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
+    </div>
+    <div class="log" id="log"><div class="ln sys">no output &mdash; run help</div></div>
+    <div class="chips" id="chips">
+      <button class="chip" data-cmd="help" type="button">help</button>
+      <button class="chip" data-cmd="info" type="button">info</button>
+      <button class="chip" data-cmd="settings" type="button">settings</button>
+      <button class="chip" data-cmd="list -a" type="button">list -a</button>
+      <button class="chip" data-cmd="list -s" type="button">list -s</button>
+      <button class="chip" data-cmd="stopscan" type="button">stopscan</button>
+    </div>
+    <form class="cmdbar" id="cmdForm">
+      <input id="cmdIn" type="text" placeholder="type a command" aria-label="command" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send">
+      <button class="btn pri go" type="submit">RUN</button>
+    </form>
+  </section>
+
+</main>
+
+<nav class="nav" aria-label="views">
+  <a href="#/dash" data-v="dash" class="on" aria-current="page"><svg class="ic" aria-hidden="true"><use href="#i-dash"/></svg><span>DASH</span></a>
+  <a href="#/wifi" data-v="wifi"><svg class="ic" aria-hidden="true"><use href="#i-wifi"/></svg><span>WIFI</span></a>
+  <a href="#/ble" data-v="ble"><svg class="ic" aria-hidden="true"><use href="#i-bt"/></svg><span>BLE</span></a>
+  <a href="#/ctrl" data-v="ctrl"><svg class="ic" aria-hidden="true"><use href="#i-ctrl"/></svg><span>CTRL</span></a>
+  <a href="#/cli" data-v="cli"><svg class="ic" aria-hidden="true"><use href="#i-cli"/></svg><span>CLI</span></a>
+</nav>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
