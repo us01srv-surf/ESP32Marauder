@@ -234,17 +234,19 @@ uint32_t currentTime  = 0;
 
 void setup()
 {
+  Serial.begin(115200);
+  Serial.println(F("S1"));  // E2 breadcrumb
   randomSeed(esp_random());
   
   #ifndef DEVELOPER
     esp_log_level_set("*", ESP_LOG_NONE);
   #endif
   
+  Serial.println(F("P0"));  // E2 breadcrumb (before esp_spiram_init)
   #ifndef HAS_IDF_3
     esp_spiram_init();
   #endif
-
-  Serial.begin(115200);
+  Serial.println(F("P1"));  // E2 breadcrumb (after esp_spiram_init)
 
   #ifdef HAS_ACT_LED
     pinMode(ACT_LED_PIN, OUTPUT);

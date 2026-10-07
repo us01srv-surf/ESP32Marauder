@@ -376,6 +376,17 @@ jobs:
           path: ${{ env.artifact_path }}
           retention-days: 5
 
+      - name: Upload Debug Symbols for ${{ matrix.board.name }}
+        if: matrix.board.file_name == 's3_n16r8'
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug_symbols_${{ matrix.board.file_name }}
+          path: |
+            ./esp32_marauder/build/esp32.esp32.${{ matrix.board.build_dir }}/*.elf
+            ./esp32_marauder/build/esp32.esp32.${{ matrix.board.build_dir }}/*.map
+          if-no-files-found: warn
+          retention-days: 5
+
   post_compile_steps:
     name: Create Release
     runs-on: ubuntu-latest
