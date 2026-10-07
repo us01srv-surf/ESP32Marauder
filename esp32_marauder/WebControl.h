@@ -24,8 +24,13 @@
 #define WEBUI_START_HEAP_MARGIN (64UL * 1024UL)
 #define WEBUI_LOW_HEAP_MARGIN   (16UL * 1024UL)
 
-// Stage 2 (deferred free) waits for in-flight requests to drain first.
-#define WEBUI_DRAIN_MS 3000
+// Stage 2 quiet-drain: the teardown only runs after WEBUI_DRAIN_MS with
+// in_flight == 0 observed on EVERY loop pass (the deadline is reset while
+// anything is in flight), so this is a quiet period, not a since-stop timer.
+// It must outlast the library's 3 s client rx-timeout, so a connection that
+// goes quiet mid-request disconnects inside the window instead of still
+// being open when the arenas are freed.
+#define WEBUI_DRAIN_MS 5000
 
 // P3: fixed-size marshaled CLI command slot (127 chars + NUL). Commands longer
 // than this are rejected with 400 BAD_PARAM instead of being truncated.
@@ -64,7 +69,8 @@ class WebControl {
 
   private:
     // In-flight tracking: called on the first line of every route handler so
-    // stage 2 can wait until no handler is executing before deleting the server.
+    // stage 2 can wait until no handler is executing before freeing the two
+    // snapshot arenas. The server object itself is never deleted (see main()).
     void trackReq(AsyncWebServerRequest* request);
     // Sends 503 {"code":"STOPPING"}/{"code":"LOW_HEAP"} (full error envelope)
     // and returns true when the caller must not continue handling the request.
@@ -100,7 +106,8 @@ class WebControl {
                           ListKind kind, uint16_t offset, uint16_t limit);
     void queueSnapshot(ListKind kind, uint16_t offset, uint16_t limit);
     // Shared P3 CLI-slot claim so /api/v1/cli and the P4 /api/v1/cmd alias
-    // decode, bound and marshal through the exact same 128-byte slot.
+    // bound and marshal through the exact same 128-byte slot (the library has
+    // already URL-decoded the value — no second decode happens here).
     void claimCliSlot(AsyncWebServerRequest* request, const char* command,
                       const String& raw);
 
@@ -122,8 +129,12 @@ class WebControl {
       };
       volatile uint8_t kind = PEND_NONE;
       volatile uint8_t arg = 0;
-      // Loop-task-only read, and only while pending_set is raised; volatile
-      // keeps the fill ordered against the flag store below.
+      // Loop-task-only read, and only while pending_set is raised. `volatile`
+      // merely stops the compiler from eliding the fill; the cross-task
+      // ordering is the module's explicit barrier standard: every producer
+      // issues __sync_synchronize() after filling and before raising
+      // pending_set, and consumePending() issues one after observing the flag
+      // and before reading the payload.
       volatile char cmd[WEBUI_CLI_MAX] = {0};
     };
 
@@ -151,9 +162,16 @@ class WebControl {
     void persistSetting(bool enabled);
     bool portalOwnsWifi();
 
+    // Allocated on the first start() and NEVER deleted (oracle review
+    // HIGH-1): stage 2 frees only the snapshot arenas, and a later start()
+    // re-begin()s this same object with its routes already registered.
     AsyncWebServer* server = nullptr;
 
     // Read by handlers from the async_tcp task.
+    // Signed on purpose: stage 2's quiet gate tests `in_flight == 0`, so a
+    // stray extra decrement that parked the counter below 0 could only block
+    // the teardown, never open it early (an unsigned counter would wrap to a
+    // huge value instead — also blocking, but for the wrong reason).
     volatile int in_flight = 0;
     volatile bool running = false;
     volatile bool stopping = false;
@@ -164,13 +182,12 @@ class WebControl {
 
     // P4 double-buffered list snapshot. The arenas are allocated on the
     // first start() and freed only by the stage-2 teardown in main() (which
-    // runs with in_flight == 0, i.e. no handler inside tryServeSnapshot()).
-    // publish_idx is the arena the async_tcp task may read; the loop task
-    // only ever writes 1 - publish_idx, and publish_idx is updated last.
+    // runs only after a quiet drain, i.e. no handler inside
+    // tryServeSnapshot()). publish_idx is the arena the async_tcp task may
+    // read; the loop task only ever writes 1 - publish_idx, and publish_idx
+    // is updated last.
     char* snap_buf[2] = {nullptr, nullptr};
     volatile int publish_idx = -1;     // -1 = nothing published yet
-    volatile uint32_t snap_seq = 0;    // publishes so far
-    volatile uint32_t snap_built_ms = 0;
     // Query hand-off, handler -> loop task: the fields are only written while
     // snap_want is down, and only read while it is up (same pattern as
     // `pending`), so a build never observes a torn query.
@@ -179,12 +196,25 @@ class WebControl {
     volatile uint16_t snap_offset = 0;
     volatile uint16_t snap_limit = WEBUI_LIST_LIMIT_DEFAULT;
     volatile uint32_t snap_req_seq = 0;  // queued builds; see queueSnapshot()
-    // Metadata of the published arena; written before publish_idx.
-    volatile ListKind pub_kind = LIST_APS;
-    volatile uint16_t pub_offset = 0;
-    volatile uint16_t pub_limit = 0;
-    volatile uint16_t pub_len = 0;
-    volatile uint32_t pub_seq = 0;
+    // Metadata of a published arena, DOUBLE-BUFFERED BY ARENA INDEX exactly
+    // like snap_buf[2] (oracle review HIGH-2: with single-slot metadata a
+    // reader could pair arena generation N's bytes with the other
+    // generation's kind/offset/limit/len/seq — spurious 503s, or a 200 at the
+    // wrong offset when lengths coincided). Protocol: the loop task fills
+    // pub_meta[target] completely and then release-stores
+    // publish_idx = target; a handler loads publish_idx ONCE (H1) and reads
+    // only pub_meta[idx]. No slot initializer is needed: a slot is only ever
+    // read through an index the writer already stored, and start() drops
+    // publish_idx back to -1 whenever the arenas are rebuilt.
+    struct PubMeta {
+      ListKind kind;
+      uint16_t offset;
+      uint16_t limit;
+      uint16_t len;
+      uint32_t seq;
+      uint32_t built_ms;
+    };
+    volatile PubMeta pub_meta[2];
     // Raised by a handler for as long as it reads a published arena. One flag
     // is enough: every handler runs in the single async_tcp task, and the
     // builder tests it between reading publish_idx and choosing its arena

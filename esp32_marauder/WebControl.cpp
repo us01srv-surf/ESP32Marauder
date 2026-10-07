@@ -59,12 +59,6 @@ static uint8_t hexNib(char c) {
   return 0;
 }
 
-// True only for characters that can appear in a %XX escape (hexNib() maps
-// anything else to 0, so callers must gate on this first).
-static bool hexOk(char c) {
-  return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
-}
-
 // ---------------------------------------------------------------------------
 // P4 list-snapshot helpers — loop task only (parseListQuery() runs in the
 // async_tcp task but only touches its own request). Every writer here is
@@ -210,18 +204,13 @@ static bool snapEsc(char* dst, size_t cap, size_t* len,
 
 // ---------------------------------------------------------------------------
 // setup() — called once from the Arduino setup() after cli_obj.RunSetup() and
-// the boot StartScan(WIFI_SCAN_OFF). Never blocks boot: the heap guard below
-// simply skips the service when DRAM is tight.
+// the boot StartScan(WIFI_SCAN_OFF). Never blocks boot: start() itself
+// carries the low-heap guard (M-1) and simply refuses to bring the service
+// up when DRAM is tight.
 // ---------------------------------------------------------------------------
 void WebControl::setup() {
   if (!settings_obj.loadSetting<bool>(WEBUI_SETTING_KEY)) {
     Serial.println(F("webui disabled (settings WebUI)"));
-    return;
-  }
-
-  if (ESP.getFreeHeap() < (uint32_t)MEM_LOWER_LIM + WEBUI_START_HEAP_MARGIN) {
-    Serial.print(F("webui skipped: low heap "));
-    Serial.println(ESP.getFreeHeap());
     return;
   }
 
@@ -233,13 +222,29 @@ void WebControl::setup() {
 // ---------------------------------------------------------------------------
 // start(mode) — lazily builds the server (once per server object), registers
 // the P1 routes, opens the listen socket and optionally brings up the SoftAP.
+// Safe to call again after stop(): the object is never deleted, so this path
+// re-begin()s it (routes stay registered exactly once via
+// s_routes_registered) and keeps arenas that stage 2 has not freed yet.
 // ---------------------------------------------------------------------------
 bool WebControl::start(uint8_t mode) {
   // Routes are registered lazily on first start() and never twice for the same
   // server object (re-registering would stack handlers). Same once-only guard
-  // EvilPortal.cpp uses in startAP(); it is cleared whenever a new server
-  // object is allocated below.
+  // EvilPortal.cpp uses in startAP(). Because the server object is retained
+  // for the whole process (HIGH-1), a fresh server — and therefore a cleared
+  // flag — happens only on the very first start(); later stop()/start()
+  // cycles re-begin the same object with its routes already in place.
   static bool s_routes_registered = false;
+
+  // Low-heap guard, hoisted to here from setup() (M-1) so the CLI path is
+  // covered too: the library's `new AsyncCallbackWebHandler` inside the
+  // registration block below is an unchecked new, so a start out of DRAM
+  // would null-deref instead of failing cleanly. Same margin setup() used:
+  // MEM_LOWER_LIM (configs.h) + 64 KB of headroom for the async_tcp task.
+  if (ESP.getFreeHeap() < (uint32_t)MEM_LOWER_LIM + WEBUI_START_HEAP_MARGIN) {
+    Serial.print(F("webui start refused: low heap "));
+    Serial.println(ESP.getFreeHeap());
+    return false;
+  }
 
   start_mode = mode;
 
@@ -284,7 +289,10 @@ bool WebControl::start(uint8_t mode) {
   // first; targets without a PSRAM chip (most of the build matrix) fall back
   // to DRAM so the list endpoints still work there. On any failure the pair
   // is released together and the endpoints answer 503 LOW_HEAP instead of
-  // building into a null arena.
+  // building into a null arena. A stop() -> start() cycle that lands BEFORE
+  // stage 2 has run sees both pointers non-null and skips this block, so the
+  // pair is never double-allocated; after stage 2 the pointers are null and
+  // the pair is rebuilt (with publish_idx reset below).
   if (snap_buf[0] == nullptr || snap_buf[1] == nullptr) {
     free(snap_buf[0]);
     free(snap_buf[1]);
@@ -404,10 +412,13 @@ bool WebControl::start(uint8_t mode) {
 
 // ---------------------------------------------------------------------------
 // stop() — STAGE 1 only, immediate and safe at any time: close the listen
-// socket (established connections keep draining) and drop the SoftAP we own.
-// The server object is freed later, from main() (STAGE 2). There is no
-// force-delete: deletion without a drain would pull handlers out from under
-// the async_tcp task.
+// socket (established connections keep draining) and drop the SoftAP we own
+// while preserving any live station link. STAGE 2 lives in main(): it frees
+// the two snapshot arenas after a quiet drain. The server object and its
+// handlers are retained for the whole process (HIGH-1) and re-begin()ed by
+// the next start() — there is no delete, and no force-delete, by design:
+// no in_flight-based gate can see a connection accepted before end() that
+// has not dispatched a request yet.
 // ---------------------------------------------------------------------------
 void WebControl::stop() {
   // Single source of truth: stop persists "WebUI = disabled".
@@ -418,7 +429,11 @@ void WebControl::stop() {
     return;
   }
 
-  if (server == nullptr) {
+  // `server` is never freed any more, so "is there anything to stop?" is the
+  // running flag, not the pointer: a second `webui stop` after stage 2 has
+  // already completed must not open a fresh drain window (it would re-raise
+  // stopping and 503-shed the few connections that may still be open).
+  if (!running || server == nullptr) {
     running = false;
     Serial.println(F("webui not running"));
     return;
@@ -426,8 +441,23 @@ void WebControl::stop() {
 
   server->end();  // closes the listen socket only; clients survive
 
-  if (owns_ap && WiFi.status() != WL_CONNECTED) {
-    WiFi.softAPdisconnect(true);
+  if (owns_ap) {
+    // Drop ONLY the AP interface — never the radio. initSoftAP() runs APSTA
+    // whenever a station link is live (see below), so the old
+    // `WiFi.status() != WL_CONNECTED` gate left an open Marauder-XXXX AP
+    // beaconing forever with no server behind it. The Arduino-ESP32 core
+    // source is not present on this machine, so softAPdisconnect()'s
+    // `wifioff` argument (semantics not verifiable here) is deliberately
+    // avoided for the live-link case: APSTA -> STA is the transition this
+    // codebase already relies on to preserve a station link (initSoftAP(),
+    // WiFiScan.cpp join paths) and it takes the AP interface down without
+    // stopping the STA interface or powering the radio off. With no station
+    // link to preserve the pre-existing softAPdisconnect(true) path is kept
+    // unchanged.
+    if (WiFi.status() == WL_CONNECTED)
+      WiFi.mode(WIFI_MODE_STA);
+    else
+      WiFi.softAPdisconnect(true);
     owns_ap = false;
   }
 
@@ -487,9 +517,10 @@ void WebControl::status() {
 }
 
 // ---------------------------------------------------------------------------
-// main() — runs in the loop task. STAGE 2 lives here: the server object is
-// deleted only once every request that was in flight at stop() time has
-// finished and the drain grace period has elapsed.
+// main() — runs in the loop task. STAGE 2 lives here: after a quiet drain
+// (WEBUI_DRAIN_MS with zero in-flight observed on every pass) the two
+// snapshot arenas are freed. The server object is NOT freed — never, at any
+// point in this file (HIGH-1).
 // ---------------------------------------------------------------------------
 void WebControl::main() {
   // P3 marshaling: run any action a route handler published first, and run it
@@ -499,21 +530,42 @@ void WebControl::main() {
   consumePending();
 
   if (stopping) {
-    if (in_flight == 0 && (millis() - end_time) >= WEBUI_DRAIN_MS) {
-      // P4: the snapshot arenas belong to the same lifecycle as the server.
-      // in_flight == 0 means no handler is inside tryServeSnapshot(), and a
-      // request that arrives from here on is shed by stop()'s STOPPING check
-      // before it ever reaches an arena — so no reader can still hold one.
+    // QUIET-PERIOD DRAIN: while anything is in flight the deadline is pushed
+    // forward, so the gate below means "WEBUI_DRAIN_MS with in_flight == 0 at
+    // every observation", not "WEBUI_DRAIN_MS since stop()". in_flight is
+    // signed (WebControl.h); a suspicious negative count is treated as busy,
+    // so an extra decrement could only delay this block, never open it early.
+    if (in_flight != 0) {
+      end_time = millis();
+    }
+    else if ((millis() - end_time) >= WEBUI_DRAIN_MS) {
+      // STAGE 2 — free the snapshot arenas only; the server object and its
+      // handlers stay allocated until process end and are re-begin()ed by the
+      // next start() (HIGH-1). No `delete server` here, and no force-delete
+      // anywhere by design: a connection accepted before end() that has not
+      // dispatched yet is invisible to in_flight (no API enumerates it), so
+      // any in_flight-based "safe to delete" gate has a real UAF window
+      // against the core-0 dispatch. Retaining ~1-1.5 KB is the accepted
+      // trade-off.
+      //
+      // Why freeing the arenas here is safe:
+      //  - during the whole drain `stopping` is still true, so any handler
+      //    that dispatches is shed with 503 STOPPING by shedRequest() on its
+      //    first line, before it can raise snap_reading or read snap_buf;
+      //  - after this block `stopping` is false but publish_idx == -1 and
+      //    snap_buf[] == nullptr, so a late handler is answered 503
+      //    LOW_HEAP/SNAPSHOT_PENDING by handleList() (or simply 200s the
+      //    non-arena endpoints) — still no arena read;
+      //  - a handler that was already past shedRequest() when stop() was
+      //    called keeps in_flight > 0, which holds the gate closed above.
       publish_idx = -1;  // drop the published reference before freeing
       snap_want = false;
       free(snap_buf[0]);
       snap_buf[0] = nullptr;
       free(snap_buf[1]);
       snap_buf[1] = nullptr;
-      delete server;
-      server = nullptr;
-      stopping = false;
-      Serial.println(F("webui freed"));
+      stopping = false;  // state STOPPED; running is already false
+      Serial.println(F("webui stopped (snapshot arenas freed, server retained)"));
     }
     return;
   }
@@ -558,8 +610,9 @@ void WebControl::sendError(AsyncWebServerRequest* request, const char* command,
   request->send(http_code, "application/json", body);
 }
 
-// 202-style acceptance: the action only *entered* the pending slot here; the
-// loop task performs it.
+// Acceptance ack (the body says "accepted"): the action only *entered* the
+// pending slot here; the loop task performs it. The status line is 200, not
+// 202 — the frontend only reads the body, so the comment used to overclaim.
 void WebControl::sendAccepted(AsyncWebServerRequest* request, const char* command) {
   char body[128];
   snprintf(body, sizeof(body),
@@ -689,6 +742,18 @@ void WebControl::handleScan(AsyncWebServerRequest* request) {
     return;
   }
 
+  // Mirror of the CLI guard, same shape as handleRecon() below: `scanall`
+  // only dispatches inside `if (!wifi_scan_obj.scanning())`
+  // (CommandLine.cpp:787) and scanning() is true for ANY non-OFF scan mode —
+  // including WIFI_SCAN_EVIL_PORTAL (WiFiScan.cpp:2599), where StartScan()
+  // would re-init the radio and drop the portal's AP, and including a BLE
+  // scan it would stack on top of. mode=off (stopscan) stays unconditional,
+  // exactly like the CLI's stopscan.
+  if (kind == PendingAction::PEND_SCAN_ON && wifi_scan_obj.scanning()) {
+    sendError(request, "scan", "BUSY", 503);
+    return;
+  }
+
   if (pending_set) {  // one slot only — never overwrite an unrun action
     sendError(request, "scan", "BUSY", 503);
     return;
@@ -696,6 +761,7 @@ void WebControl::handleScan(AsyncWebServerRequest* request) {
 
   pending.arg = 0;
   pending.kind = kind;
+  __sync_synchronize();  // release: payload visible before the flag is raised
   pending_set = true;  // publish after the payload is filled
   sendAccepted(request, "scan");
 }
@@ -747,6 +813,7 @@ void WebControl::handleRecon(AsyncWebServerRequest* request) {
 
   pending.arg = 0;
   pending.kind = kind;
+  __sync_synchronize();  // release: payload visible before the flag is raised
   pending_set = true;
   sendAccepted(request, "recon");
 }
@@ -754,8 +821,9 @@ void WebControl::handleRecon(AsyncWebServerRequest* request) {
 // POST /api/v1/cli?cmd=<urlencoded> — P3-lite. The command string is copied
 // into the fixed 128-byte slot and run by the loop task; its output stays on
 // serial (capturing it is out of scope). Commands longer than 127 bytes are
-// rejected, never truncated. Decoding/claiming lives in claimCliSlot(), which
-// the P4 /api/v1/cmd alias shares verbatim.
+// rejected, never truncated. Claiming/bounding lives in claimCliSlot(), which
+// the P4 /api/v1/cmd alias shares verbatim (the value arrives already
+// URL-decoded from the library).
 void WebControl::handleCli(AsyncWebServerRequest* request) {
   trackReq(request);
   if (shedRequest(request, "cli"))
@@ -803,39 +871,21 @@ void WebControl::handleCmd(AsyncWebServerRequest* request) {
   claimCliSlot(request, "cmd", cmd_param->value());
 }
 
-// Shared P3 CLI-slot claim (called by handleCli and handleCmd): decodes %XX
-// escapes, enforces the 127-byte limit and publishes PEND_CLI for main().
+// Shared P3 CLI-slot claim (called by handleCli and handleCmd): bounds-checks
+// the command, enforces the 127-byte limit and publishes PEND_CLI for main().
 // Always sends exactly one response, using `command` ("cli"/"cmd") in the
 // envelope and the same codes as before: 400 BAD_PARAM, 503 BUSY.
 void WebControl::claimCliSlot(AsyncWebServerRequest* request,
                               const char* command, const String& raw) {
-  // Minimal %XX decode. ESPAsyncWebServer already decodes query and
-  // form-body parameters (WebRequest.cpp: _addGetParams / _parsePlainPostChar),
-  // so this is normally a no-op; it only fires for values that still carry a
-  // valid escape. Invalid escapes are copied through untouched, and a %XX
-  // that would not fit is an overflow.
-  char decoded[WEBUI_CLI_MAX];
-  size_t out = 0;
-  for (size_t i = 0; i < raw.length(); i++) {
-    const char c = raw[i];
-    char value;
-    if (c == '%' && (i + 2) < raw.length() &&
-        hexOk(raw[i + 1]) && hexOk(raw[i + 2])) {
-      value = (char)((hexNib(raw[i + 1]) << 4) | hexNib(raw[i + 2]));
-      i += 2;
-    }
-    else {
-      value = c;
-    }
-    if (out + 1 >= sizeof(decoded)) {  // >127 decoded bytes
-      sendError(request, command, "BAD_PARAM", 400);
-      return;
-    }
-    decoded[out++] = value;
-  }
-  decoded[out] = '\0';
-
-  if (out == 0) {
+  // NO second %XX decode here (M-4): ESPAsyncWebServer already URL-decodes
+  // both query and form-body parameters (WebRequest.cpp: _addGetParams and
+  // _parsePlainPostChar each call urlDecode()), so `raw` is the literal
+  // command. Decoding again would corrupt any percent that legitimately
+  // survived the first pass — e.g. a password sent as %2525 or containing a
+  // literal "%25" would come back mangled — so only the cap is enforced:
+  // empty or >127 bytes is 400 BAD_PARAM, never truncation.
+  const size_t n = raw.length();
+  if (n == 0 || n >= WEBUI_CLI_MAX) {
     sendError(request, command, "BAD_PARAM", 400);
     return;
   }
@@ -845,10 +895,12 @@ void WebControl::claimCliSlot(AsyncWebServerRequest* request,
     return;
   }
 
-  for (size_t i = 0; i <= out; i++)  // include the NUL
-    pending.cmd[i] = decoded[i];
+  for (size_t i = 0; i < n; i++)
+    pending.cmd[i] = raw[i];
+  pending.cmd[n] = '\0';
   pending.arg = 0;
   pending.kind = PendingAction::PEND_CLI;
+  __sync_synchronize();  // release: payload visible before the flag is raised
   pending_set = true;
   sendAccepted(request, command);
 }
@@ -918,6 +970,11 @@ bool WebControl::parseListQuery(AsyncWebServerRequest* request,
 // snap_reading is raised BEFORE publish_idx is read — buildSnapshot() relies
 // on exactly that order (its L1/L3 pair), which is what keeps a build from
 // choosing the very arena this handler is copying out of.
+//
+// Generation safety (HIGH-2): the index is loaded ONCE at H1 and every piece
+// of metadata comes from pub_meta[idx] — the slot that belongs to that very
+// arena — so this handler can never pair arena generation N's bytes with the
+// other generation's kind/offset/limit/len/seq/built_ms.
 bool WebControl::tryServeSnapshot(AsyncWebServerRequest* request,
                                   const char* command, ListKind kind,
                                   uint16_t offset, uint16_t limit) {
@@ -930,20 +987,20 @@ bool WebControl::tryServeSnapshot(AsyncWebServerRequest* request,
   const bool match =
       (idx >= 0 && idx <= 1) &&
       (snap_buf[idx] != nullptr) &&
-      (pub_kind == kind) &&
-      (pub_offset == offset) &&
-      (pub_limit == limit) &&
-      (pub_len > 0) &&
-      (pub_len <= WEBUI_SNAP_BUF_SIZE) &&
-      (pub_seq >= need) &&
-      ((uint32_t)(millis() - snap_built_ms) < WEBUI_SNAP_FRESH_MS);
+      (pub_meta[idx].kind == kind) &&
+      (pub_meta[idx].offset == offset) &&
+      (pub_meta[idx].limit == limit) &&
+      (pub_meta[idx].len > 0) &&
+      (pub_meta[idx].len <= WEBUI_SNAP_BUF_SIZE) &&
+      (pub_meta[idx].seq >= need) &&
+      ((uint32_t)(millis() - pub_meta[idx].built_ms) < WEBUI_SNAP_FRESH_MS);
 
   if (!match) {
     snap_reading = false;
     return false;
   }
 
-  const uint16_t len = pub_len;
+  const uint16_t len = pub_meta[idx].len;
   String body(snap_buf[idx]);  // copy out of PSRAM into DRAM
   snap_reading = false;        // the arena is no longer referenced
 
@@ -1054,6 +1111,7 @@ void WebControl::refreshNetCache() {
 void WebControl::consumePending() {
   if (!pending_set)
     return;
+  __sync_synchronize();  // acquire: the producer's fill precedes these reads
 
   // Copy everything out first, then lower the flag: the producer only writes
   // while the flag is down, so the payload cannot change under this read.
@@ -1070,7 +1128,13 @@ void WebControl::consumePending() {
   switch (kind) {
     case PendingAction::PEND_SCAN_ON:
       // cf. `scanall` (CommandLine.cpp): color defaults to 0, no TFT needed.
-      wifi_scan_obj.StartScan(WIFI_SCAN_AP_STA);
+      // Re-check, mirroring the PEND_RECON_* cases below: a scan — or the
+      // Evil Portal — that started between the HTTP request and this loop
+      // pass must not be stomped (StartScan() would re-init the radio).
+      if (wifi_scan_obj.scanning())
+        Serial.println(F("webui: scan skipped (another scan is running)"));
+      else
+        wifi_scan_obj.StartScan(WIFI_SCAN_AP_STA);
       break;
 
     case PendingAction::PEND_SCAN_OFF:
@@ -1179,14 +1243,20 @@ bool WebControl::buildSnapshot() {
     return false;  // overflow/empty build: nothing published, keep the old one
   dst[len] = '\0'; // builders reserve 16 B + WEBUI_SNAP_ENTRY_ROOM, so len < cap
 
-  // Metadata first, index last: publish_idx is the release flag for readers.
-  pub_kind = kind;
-  pub_offset = offset;
-  pub_limit = limit;
-  pub_len = (uint16_t)len;
-  pub_seq = req;
-  snap_seq++;
-  snap_built_ms = millis();
+  // Metadata for THIS arena slot first, index last: publish_idx is the
+  // release flag for readers. pub_meta[] is double-buffered with snap_buf[],
+  // and pub_meta[target] is only ever read by a handler whose H1 index
+  // already equals target — which (barring start() resetting the index to
+  // -1) can only happen after the store below, and never while this task is
+  // writing it: L3 already guaranteed no handler was inside tryServeSnapshot()
+  // when this build started, and handlers only read the slot named by the
+  // index they loaded. Two generations therefore can never mix.
+  pub_meta[target].kind = kind;
+  pub_meta[target].offset = offset;
+  pub_meta[target].limit = limit;
+  pub_meta[target].len = (uint16_t)len;
+  pub_meta[target].seq = req;
+  pub_meta[target].built_ms = millis();
   __sync_synchronize();  // payload + metadata visible before the index
   publish_idx = target;
   return true;
